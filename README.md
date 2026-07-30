@@ -238,11 +238,3 @@ MIT — see [LICENSE](LICENSE).
 **Aircraft** — FPV, drone, quadcopter, quad, multirotor, RC plane, fixed wing, model aircraft, long range
 
 **British spellings** — colour radio, colour LCD, colour-radio widget, EdgeTX colour screen, metres, kilometres, greyed out. The project is written in US English; these are here so a search in either spelling finds it.
-
-Ready to paste into the repository's **Topics** field (GitHub allows 20):
-
-```
-edgetx edgetx-widget lua telemetry gps qr-code crsf elrs expresslrs
-betaflight inav fpv drone quadcopter rc-plane radiomaster tx16s
-lost-model-locator google-maps flight-controller
-```
