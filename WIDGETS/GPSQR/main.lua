@@ -4,7 +4,9 @@
 --  Shows satellites, live coordinates, a scannable Google-Maps QR code, height
 --  above take-off (plus MSL), speed, course, distance to home, trip, flight
 --  time, the radio battery, milliamp-hours drawn, the time of day, and an ELRS
---  RF panel.
+--  RF panel. Works with Betaflight, INAV and ArduPilot (Copter/Plane/Rover/Sub)
+--  over CRSF telemetry -- see the note above AP_MODES for the one setting worth
+--  changing on an ArduPilot model: CRSF_FM_DISARM_STAR.
 --
 --  SCREENS: exactly three panels are accepted, each with its own entry in
 --  PROFILES. 800x480 (RadioMaster TX16S MK3, the only EdgeTX board with that
@@ -189,6 +191,14 @@ local CFG = {
   -- suppressed on an INAV model. This is detected from the flight-mode string
   -- (see identifyFC) and needs no configuration.
   --
+  -- ARDUPILOT sends exactly ONE altitude, over the standard CRSF GPS frame: the
+  -- GPS's own location.alt, which is genuine above-sea-level altitude and is
+  -- never re-datumed at arm (AP_CRSF_Telem.cpp calc_gps() -- the same shape as
+  -- "Betaflight master/5.x" below, so no separate configuration or code path is
+  -- needed for it). It is discovered as GAlt/Alt exactly like a Betaflight or
+  -- INAV model with only one altitude sensor -- ArduPilot has no relative-height
+  -- CRSF sensor of its own, so ALT_REL_SENSORS is simply never populated on one.
+  --
   -- If your FC's "Alt" misbehaves (some report absolute altitude, or change
   -- their reference mid-flight), set ALT_REL_SENSORS = {} to ignore it and let
   -- the widget derive height above take-off from GPS altitude instead. If both
@@ -205,6 +215,18 @@ local CFG = {
   -- Flight-controller flight-mode string. Betaflight/INAV send this over CRSF
   -- and encode the arming state in it (see readArmed): this is the real
   -- ARMED/DISARMED signal from the model. Run "Discover new sensors" to get it.
+  --
+  -- ArduPilot sends the very same CRSF flight-mode frame (AP_CRSF_Telem.cpp
+  -- calc_flight_mode(), same "Flight mode"/"FM" sensor above) but, UNLIKE
+  -- Betaflight and INAV, it does NOT encode arm state in it by default -- the
+  -- string is just the bare mode name ("STAB", "LOIT", "AUTO", ...) whether
+  -- armed or not. To get the same disarmed marker Betaflight sends for free,
+  -- enable ArduPilot's own RC_OPTIONS bit named CRSF_FM_DISARM_STAR (Mission
+  -- Planner/MAVProxy show it by name in the RC_OPTIONS bitmask). Once that is
+  -- set, this widget reads a trailing "*" while disarmed exactly like it does
+  -- on Betaflight -- see the note above AP_MODES. Without it, arm state falls
+  -- back to a radio switch (ARM_MODE below) or motion detection, same as any
+  -- model with no flight-mode sensor at all.
   ARM_SENSORS   = { "FM", "Fmod", "Flight mode" },
 }
 
@@ -630,6 +652,14 @@ local function newState() return {
   spdKmh = 0, hdg = 0,
   altMsl = nil, altRelFC = nil, altRel = nil,
   fcINav = nil,    -- firmware family, proven from the flight-mode string (identifyFC)
+  fcArdu = false,  -- narrower than fcINav: specifically ArduPilot (see AP_MODES)
+  apStarSeen = false, -- have we ever seen ArduPilot's optional "*" disarm marker
+                   -- on THIS model? Proves CRSF_FM_DISARM_STAR is enabled, which
+                   -- is the only thing that makes "no marker" mean ARMED on
+                   -- ArduPilot rather than merely "unconfigured" -- see readArmed.
+  modeTxt = nil,   -- current flight-mode text for the header's third pill, kept
+                   -- up to date in readArmed alongside arm state -- nil when
+                   -- there is no flight-mode sensor to read at all.
   homeAltM = nil,  -- launch reference that MOVES with the sensor's datum
   homeMsl  = nil,  -- launch elevation, captured disarmed, never shifted
   mslZeroed = false, -- FC re-datumed the GPS altitude at arm (BF 4.3-4.5)
@@ -1014,6 +1044,36 @@ local INAV_ARMED = {
   ANGH = true, LOTR = true, TURT = true, WRTH = true, GEO  = true, LAND = true,
 }
 
+-- ---------------------------------------------------------------------------
+--  ArduPilot mode names -- name4(), the exact 4-byte string AP_CRSF_Telem.cpp
+--  calc_flight_mode() puts on the wire (notify->get_flight_mode_str(), which is
+--  Mode::name4()). Used ONLY to recognise the model as ArduPilot; MSL/altitude
+--  handling needs no separate path once that is known (see the note on
+--  ALT_MSL_SENSORS above -- ArduPilot lands in exactly the same "not INAV"
+--  bucket as Betaflight, because its GPS altitude is real MSL that never
+--  re-datums, same as Betaflight master/5.x). Confirmed against ArduCopter,
+--  ArduPlane, Rover and Sub master/mode.h; a mode not listed here simply is not
+--  recognised as ArduPilot from THAT frame -- every model passes through
+--  STAB/ACRO/ALTH/MANU on the ground before arming, so one miss costs nothing.
+--
+--  LAND and HOLD are deliberately NOT here even though ArduCopter/ArduPlane and
+--  Rover have modes of those names: both strings are already claimed by
+--  INAV_ARMED above, and with nothing else to go on, Rule 1 says the SAFER of
+--  the two misreadings wins -- treating an unfamiliar "LAND"/"HOLD" as INAV
+--  only ever SUPPRESSES the MSL line (an absence), where treating a genuine
+--  INAV model as ArduPilot would fabricate one (a confidently wrong number). An
+--  ArduPilot model that happens to power up already in Land or Hold mode is
+--  misread as INAV until its next mode change; every other mode name below is
+--  unambiguous and re-identifies it immediately.
+local AP_MODES = {
+  STAB = true, ACRO = true, ALTH = true, AUTO = true, ARTL = true, ATUN = true,
+  BRAK = true, CIRC = true, DRIF = true, FLIP = true, GUID = true, LOIT = true,
+  ["RTL "] = true, RTL = true, MANU = true, TRAN = true, INIT = true,
+  FBWA = true, FBWB = true, CRUS = true, AVOI = true,
+  QSTB = true, QHOV = true, QLOT = true, QLND = true, QRTL = true, QATN = true,
+  TKOF = true,
+}
+
 -- One marker character, and never part of a mode name except in "!FS!".
 local function armMarker(fm)
   if fm == "!FS!" then return nil end
@@ -1028,7 +1088,17 @@ end
 -- so it is re-proven per model rather than per session.
 local function identifyFC(fm)
   if st.fcINav ~= nil then return end                    -- already settled
-  if INAV_DISARMED[fm] or INAV_ARMED[fm] then
+  -- Strip a possible trailing marker before matching AP_MODES: ArduPilot's
+  -- OWN marker (see AP_MODES) lands on the same "*" byte Betaflight uses, so a
+  -- starred ArduPilot mode ("STAB*") must still match its bare name ("STAB").
+  local base = fm
+  local mark = armMarker(fm)
+  if mark ~= nil then base = string.sub(fm, 1, -2) end
+  if AP_MODES[base] then
+    st.fcArdu = true
+    st.fcINav = false          -- see the note on ALT_MSL_SENSORS: same bucket
+                                -- as Betaflight for altitude purposes
+  elseif INAV_DISARMED[fm] or INAV_ARMED[fm] then
     st.fcINav = true
     -- readSensors runs a frame ahead of this, so an INAV model's relative
     -- altitude has already been through the MSL machinery once. Everything it
@@ -1036,7 +1106,7 @@ local function identifyFC(fm)
     -- carry it into the flight.
     st.altMsl,  st.mslGround, st.mslCand,   st.mslCandT = nil, nil, nil, nil
     st.homeMsl, st.maxMsl,    st.fcAltIsMsl, st.mslZeroed = nil, nil, false, false
-  elseif armMarker(fm) ~= nil then
+  elseif mark ~= nil then
     st.fcINav = false                                    -- Betaflight-style marker
   end
 end
@@ -1050,6 +1120,23 @@ local function readArmed()
   -- Identify BEFORE the ARM_MODE branch: a pilot who arms from a radio switch
   -- still needs the altitude routed correctly for their firmware.
   if fm ~= nil then identifyFC(fm) end
+
+  -- The header's flight-mode pill wants the same string, minus any trailing
+  -- marker -- that character is arm-state plumbing, not part of the mode name
+  -- a pilot would recognise ("STAB*" should read as "STAB"). This runs
+  -- regardless of CFG.ARM_MODE: even a pilot arming from a radio switch still
+  -- wants to see the FC's own idea of the current mode. Note that INAV
+  -- overloads this exact sensor while disarmed -- see INAV_DISARMED -- so
+  -- "OK"/"WAIT"/"!ERR" is what shows there, not a flight-mode name; that is
+  -- what the FC is actually sending at that moment, so it is shown as is.
+  if fm == nil then
+    st.modeTxt = nil
+  elseif fm == "!FS!" then
+    st.modeTxt = "FAILSAFE"
+  else
+    local m = armMarker(fm)
+    st.modeTxt = (m ~= nil) and string.sub(fm, 1, -2) or fm
+  end
 
   if CFG.ARM_MODE ~= "auto" then                 -- an explicit radio switch wins
     local v = svNum(sv(CFG.ARM_MODE))
@@ -1072,10 +1159,28 @@ local function readArmed()
     -- ...with one exception for the mode NAME: Betaflight 4.3 has no '!' marker
     -- (it writes '*' unconditionally when disarmed) and signals arming-disabled
     -- as "!ERR*" instead. "WAIT*" is NOT such a case -- see FM_BLOCKED.
+    --
+    -- ArduPilot only ever sends '*' (CRSF_FM_DISARM_STAR, see CFG.ARM_SENSORS),
+    -- and only while disarmed -- so it takes this exact branch too. Seeing ANY
+    -- marker here, on ANY firmware, is standing proof the marker convention is
+    -- live for this model: remember it, because on ArduPilot that is the only
+    -- thing that makes the no-marker case below mean ARMED rather than merely
+    -- "star option not enabled" (see the paragraph below).
+    st.apStarSeen = true
     return "disarmed", mark == "!" or FM_BLOCKED[string.sub(fm, 1, -2)] == true
   end
-  -- No marker: either INAV, or an ARMED Betaflight.
+  -- No marker at all. On Betaflight or INAV this is unambiguous (INAV never
+  -- marks; Betaflight marks only while disarmed, so no marker there IS armed).
+  -- On ArduPilot it is NOT unambiguous by default: CRSF_FM_DISARM_STAR is an
+  -- opt-in RC_OPTIONS bit (see CFG.ARM_SENSORS), so an unmarked mode string can
+  -- mean either "armed" or "disarmed, but the option is off" -- and Rule 1 says
+  -- an honest "no source" beats guessing between those. Once apStarSeen is
+  -- true, though, a starred frame has already proven the option IS on for this
+  -- model, so from then on an unmarked frame can only be the armed case, read
+  -- exactly like Betaflight. Until then, fall through to nil and let the
+  -- ARM_MODE chain (a radio switch, then motion) carry the model instead.
   if INAV_DISARMED[fm] then return "disarmed", FM_BLOCKED[fm] == true end
+  if st.fcArdu and not st.apStarSeen then return nil, false end
   return "armed", false
 end
 
@@ -1759,8 +1864,12 @@ local PROFILES = {
     name = "800x480", w = 800, h = 480,   -- RadioMaster TX16S MK3 (verified)
     pad = 10,
     -- fonts
-    fLabel = SMLSIZE, fVal = DBLSIZE, fPill = SMLSIZE, fTimer = MIDSIZE,
-    fBatt  = MIDSIZE, fStripL = SMLSIZE, fStripV = F_STD,  fCoL  = SMLSIZE,
+    -- Timer and battery run one step smaller than the model name, MIDSIZE ->
+    -- F_STD: matches the smaller panels below (see the 480x272 comment) and
+    -- hands the freed width to the header's elastic objects -- the model name,
+    -- and now a third pill for the flight-mode text (see drawHeader).
+    fLabel = SMLSIZE, fVal = DBLSIZE, fPill = SMLSIZE, fTimer = F_STD,
+    fBatt  = F_STD,   fStripL = SMLSIZE, fStripV = F_STD,  fCoL  = SMLSIZE,
     fCo    = F_BOLD,  fName = MIDSIZE,
     fPhBig = DBLSIZE, fPhSm = SMLSIZE,
     -- header
@@ -2183,15 +2292,21 @@ end
 
 -- Header, laid out as FOUR objects evenly spaced across the bar:
 --
---   [model name]     [GPS pill][ARM pill]     [timer]     [battery]
+--   [model name]     [GPS pill][ARM pill][MODE pill]     [timer]     [battery]
 --
--- The two pills count as ONE object: they keep a fixed gap so the pair reads as
--- a unit and the arm pill never drifts when the GPS text changes. Only the space
+-- The pills count as ONE object: they keep a fixed gap so the group reads as a
+-- unit and the arm pill never drifts when the GPS text changes. Only the space
 -- BETWEEN objects is distributed, and it is split equally. The name is pinned to
 -- the left margin and the battery to the right, exactly where it has always sat.
 --
 -- The timer needs no label: mm:ss beside an arm-state pill is unambiguous, and
 -- dropping "FLIGHT TIME" is what buys the room for the model name.
+--
+-- Unlike the GPS/ARM pills, MODE has no closed vocabulary to measure a fixed
+-- width from -- any firmware can put any string in its flight-mode sensor -- so
+-- it is sized to its OWN text every frame, capped by fitText so a pathological
+-- string cannot push everything else off the bar. It is simply omitted (no
+-- pill, no gap for it) whenever st.modeTxt is nil, exactly like the name.
 local function drawHeader(L)
   local OX, OY, W = L.OX, L.OY, L.W
   local hh = L.header[4]
@@ -2211,7 +2326,18 @@ local function drawHeader(L)
 
   -- ---- object widths
   local pillH, pillW = L.pillH, L.pillW
+  -- MODE pill: text-fit, not vocabulary-fit (see the note above). Capped to
+  -- ~30% of the bar's usable width so one oddball firmware string cannot starve
+  -- the name and the fixed objects beside it -- fitText marks any real cut
+  -- with ".." rather than silently dropping characters.
+  local modeTxt, modeTextW, modePillW = nil, 0, 0
+  if st.modeTxt ~= nil then
+    local maxModeTextW = floor((W - 2 * pad) * 0.30)
+    modeTxt, modeTextW = fitText(st.modeTxt, L.fPill, maxModeTextW)
+    if modeTextW > 0 then modePillW = modeTextW + 2 * L.P.pillPad end
+  end
   local pillsW = pillW * 2 + gap
+  if modePillW > 0 then pillsW = pillsW + gap + modePillW end
   local tstr = fmtTime(st.flightSec)
   local timerW, tmh = textSize(tstr, L.fTimer)
   -- Reserve at least "00:00" so the spacing does not twitch as the digits change,
@@ -2266,6 +2392,10 @@ local function drawHeader(L)
   if st.armWarn then ac = C.amber
   else ac = st.armed and C.green or C.dim end
   pill(x + pillW + gap, pillY, pillW, pillH, ac, at, L.fPill)
+  -- Current flight mode, third in the group -- light blue like the altitude card's accent (C.blue)
+  if modePillW > 0 then
+    pill(x + 2 * (pillW + gap), pillY, modePillW, pillH, C.blue, modeTxt, L.fPill)
+  end
   x = x + pillsW + g
 
   lcd.drawText(x, cy - floor(tmh / 2), tstr, L.fTimer + C.white)
