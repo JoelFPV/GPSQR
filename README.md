@@ -6,6 +6,8 @@ Full-screen GPS and ELRS telemetry for EdgeTX color radios, with a scannable Goo
 
 ![The GPSQR widget running on a RadioMaster TX16S MK3](docs/screenshot.png)
 
+![The GPSQR widget running on a RadioMaster TX16S MK3](docs/screenshot2.png)
+
 ---
 
 Lost a quad in a field? Point your phone at the radio. GPSQR keeps a live, scannable Google-Maps QR of your model's last known position on screen — no cables, no apps, no writing coordinates on your hand.
@@ -39,7 +41,7 @@ Lost a quad in a field? Point your phone at the radio. GPSQR keeps a live, scann
 - **EdgeTX color radios** with an **800×480**, **480×272** or **480×320** screen. [Check yours below](#supported-radios).
 - **EdgeTX 2.8 or newer.**
 - **CRSF / ELRS** telemetry. Most of the screen degrades gracefully without ELRS.
-- **Betaflight and iNAV**, detected automatically.
+- **Betaflight, iNAV, and Ardupilot**, detected automatically.
 - **Metric or imperial** — one constant you can change yourself at the top of the Lua script.
 - A **GPS-equipped model** for the GPS features. Without one, everything else still works and the GPS cards honestly read `--`.
 
@@ -93,6 +95,10 @@ Lost a quad in a field? Point your phone at the radio. GPSQR keeps a live, scann
 
    > **The reboot matters.** A sensor keeps its last received value until the radio restarts, and re-discovering rebuilds the *list* without clearing those values. A leftover sensor can go on reporting a stale number on a model that has no such hardware — seen on a GPS-less model reporting 1–2 satellites until it was power-cycled. **Power-cycle after any sensor surgery.**
 
+### Note for Ardupilot ###
+
+For Ardupilot flight modes to display properly, use Mission Planner or another GCS to change the `RC_OPTIONS` parameter in your aircraft's flight controller. Enable bit 12 for "Annotate flight mode with * on disarm".
+
 ---
 
 ## Reading the screen
@@ -123,6 +129,10 @@ Read from the flight controller itself. Amber always means **"don't take off yet
 - **`DISARMED` amber is about your telemetry, not the FC.** Home is captured at take-off and needs a lock, so arming before then costs you the home point — and with it `DISTANCE TO HOME` and height above take-off. A model with no GPS never shows this warning, so it will not sit amber forever.
 - **`BLOCKED` is the model talking** — the FC reports arming disabled. Usually throttle not at idle, model not level, calibration pending, or an arming switch already on. It clears the moment the FC is happy. Only ever shown on the ground.
 - **If telemetry is lost the pill holds its last state** rather than claiming `DISARMED`. A lost link means *unknown*, and the model may well still be flying.
+
+### The Flight Mode pill ###
+
+Read from the flight controller itself. Once a flight mode is detected in the telemetry, the pill will be displayed and read the current flight mode. If no modes are detected in the telemetry, the pill remains hidden and never shown.
 
 ### What each card shows, and when
 
@@ -220,6 +230,8 @@ GPSQR is a project by **Joël Conus** — the design, the requirements, and the 
 The **code** was written by **Claude** ([Anthropic](https://www.anthropic.com)) — every line of the widget, and this documentation.
 
 Where the firmware's behavior mattered, it was read rather than guessed: the widget's own comments cite the EdgeTX, Betaflight and iNAV source each rule was derived from.
+
+Ardupilot support added by Keith Luneau, with the help of **Claude**
 
 ## License
 
