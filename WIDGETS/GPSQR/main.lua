@@ -1,15 +1,18 @@
 -- ============================================================================
---  GPSQR - full-screen GPS / ELRS telemetry widget for EdgeTX color radios
+--  GPSQR 1.2.0 - full-screen GPS / ELRS telemetry widget for EdgeTX color radios
 --
 --  Shows satellites, live coordinates, a scannable Google-Maps QR code, height
 --  above take-off (plus MSL), speed, course, distance to home, trip, flight
---  time, the radio battery, milliamp-hours drawn, the time of day, and an ELRS
---  RF panel.
+--  time, the radio battery, milliamp-hours drawn, the time of day, the flight
+--  controller's own flight-mode string, and an ELRS RF panel. Works with
+--  Betaflight, INAV and ArduPilot over CRSF, with the firmware detected from
+--  that same mode string -- see AP_MODES for the one ArduPilot setting worth
+--  changing (RC_OPTIONS bit 12, CRSF_FM_DISARM_STAR).
 --
 --  SCREENS: exactly three panels are accepted, each with its own entry in
 --  PROFILES. 800x480 (RadioMaster TX16S MK3, the only EdgeTX board with that
 --  panel) and 480x272 (TX16S MK1/MK2, X10, X12S, T16, T18, ...) are both
---  measured and flight-tested; 480x320 (PL18, ST16, T15, T22, TX15) has its own
+--  measured and flight-tested; 480x320 (GX15, PL18, ST16, T15, T22, TX15) has its
 --  profile but has never run on hardware. Any other panel is REFUSED with an
 --  on-screen notice rather than approximated -- handing a 320x240 radio a layout
 --  measured for a bigger one just draws a third of it off the edge.
@@ -69,6 +72,17 @@
 --  Enable : Screens -> one-zone layout -> GPSQR, with the top bar, flight mode,
 --           sliders and trims all OFF so it gets the whole screen.
 -- ============================================================================
+
+-- Which build this file is, for bug reports. A widget is copied to an SD card and
+-- lives there for months, so a copy has to be identifiable on its own -- "grep
+-- VERSION main.lua" -- without the repository it came from.
+--
+-- NOTHING READS THIS, on purpose. It is not drawn: the screen is an instrument
+-- and a version number is not flight information, so it would only take room from
+-- something that is. It is a local rather than a comment so it survives a tool
+-- that strips comments, and it is recorded here so the next dead-code audit
+-- leaves it alone.
+local VERSION = "1.2.0"
 
 -- ---------------------------------------------------------------------------
 --  USER CONFIGURATION
@@ -139,18 +153,41 @@ local CFG = {
   QR_PREC       = 6,          -- worst-case URL is 49 bytes; the Version-3 QR holds 53
   DISP_PREC     = 6,          -- keep equal to QR_PREC so the readout matches the code
 
-  -- The QR is always on screen and re-encoded every QR_REFRESH seconds.
+  -- METERS THE MODEL MUST MOVE before the QR is re-encoded.
   --
-  -- 5 s is not a compromise, it is the floor AND the right answer. The limit is
-  -- not the encoder but how often a new POSITION arrives: a CRSF GPS frame is
-  -- 19 bytes and an ELRS downlink slot carries 5, so a fix lands every few
-  -- seconds and asking more often just re-encodes unchanged coordinates.
-  -- Slower was measured and buys nothing: at 5/10/15 s the WORST frame is
-  -- identical (59 of the 100 tick budget -- a rebuild costs what it costs
-  -- whenever it happens) and the mean differs by under 2 ticks. Meanwhile after
-  -- a telemetry loss the code catches up to the final fix at the next interval,
-  -- so slower only means waiting longer for the position you actually need.
-  QR_REFRESH    = 5,
+  -- The code is always on screen, and it rebuilds when the POSITION CHANGES --
+  -- not on a clock. There used to be a QR_REFRESH timer (5 s); it was the single
+  -- largest contributor to how stale the displayed code could be. The lag from
+  -- "the model was here" to "the code says so" is three terms:
+  --     time since the fix was sampled   -- set by your telemetry ratio
+  --   + time waiting for the next rebuild -- was up to QR_REFRESH, now ~0
+  --   + the build itself                  -- 22 frames = 3.2 s on an MK3,
+  --                                          3.9 s on an MK2 (see QR_SLICE)
+  -- Removing the middle term took the worst case at a 1 Hz fix rate from ~10.6 s
+  -- to ~4.2 s (MK3) / ~4.9 s (MK2), and cost nothing: a rebuild cannot start
+  -- while one is running (qrBusy), so the build is its own rate limiter.
+  --
+  -- THOSE SECONDS ARE FRAMES x THE RADIO'S REFRESH PERIOD, not CPU time, and the
+  -- period was measured rather than assumed -- an earlier version of this note
+  -- said 0.93 s because it multiplied the frame count by LVGL's 30 ms display
+  -- refresh, which is not the rate EdgeTX calls a widget at. The field bears the
+  -- corrected model out: at QR_SLICE 20 the build took 32 frames, and the two
+  -- radios were timed at 4.5 s and 5.5 s per code -- 32 x 145 ms and 32 x 177 ms.
+  --
+  -- WHY A DISTANCE AND NOT "ANY NEW FIX": at 6 decimals the coordinate string
+  -- changes on essentially every frame, because a parked receiver wanders. This
+  -- is the same jitter floor TRIP_MIN_STEP uses and it was measured the same
+  -- way -- a stationary TX16S/ELRS setup reaches ~2 m of excursion, so 3 m
+  -- clears it. It is a SEPARATE constant on purpose: the two answer different
+  -- questions (do not accumulate phantom trip / do not burn CPU re-encoding a
+  -- model that has not moved), and binding them would mean retuning one
+  -- silently changed the other.
+  --
+  -- Measured from the position the CURRENT CODE ENCODES, not from the previous
+  -- frame, so a slow drift still accumulates and eventually triggers -- exactly
+  -- as TRIP_MIN_STEP does. In flight the gate never blocks: at 42 km/h the model
+  -- covers 3 m in a quarter of a second.
+  QR_MIN_MOVE   = 3.0,
 
   -- radio-battery gauge. The real min/max are read from your radio's battery
   -- range (Radio Settings) automatically; these are only a fallback.
@@ -183,6 +220,13 @@ local CFG = {
   -- other name to both lists -- on a radio that really has both, that would feed
   -- the same measurement in twice under two meanings.
   --
+  -- ARDUPILOT needs no configuration and no code path of its own: it sends ONE
+  -- altitude, the GPS's own location.alt, over the standard CRSF GPS frame
+  -- (AP_CRSF_Telem.cpp calc_gps()). That is genuine above-sea-level altitude and
+  -- it is never re-datumed at arm -- the same shape as Betaflight master/5.x -- so
+  -- it is discovered as GAlt or Alt exactly like any other single-altitude model
+  -- and handled by the same machinery.
+  --
   -- ON INAV THERE IS NO MSL AT ALL, whatever the sensor is called. INAV puts its
   -- position estimator's height above the launch origin into the CRSF altitude
   -- field, so the reading is relative at every moment and the MSL line is
@@ -205,6 +249,20 @@ local CFG = {
   -- Flight-controller flight-mode string. Betaflight/INAV send this over CRSF
   -- and encode the arming state in it (see readArmed): this is the real
   -- ARMED/DISARMED signal from the model. Run "Discover new sensors" to get it.
+  --
+  -- ARDUPILOT sends the very same frame (AP_CRSF_Telem.cpp calc_flight_mode(),
+  -- the same "FM" sensor) but does NOT encode arm state in it by default -- the
+  -- string is the bare mode name ("STAB", "LOIT", "AUTO", ...) armed or not.
+  -- ArduPilot has its own opt-in for the Betaflight-style marker: RC_OPTIONS
+  -- bit 12, "Annotate flight mode with * on disarm" (CRSF_FM_DISARM_STAR; Mission
+  -- Planner shows it by name in the RC_OPTIONS bitmask). Turn it on and this
+  -- widget reads the trailing "*" exactly as it does on Betaflight.
+  --
+  -- WITHOUT it, arm state falls back to a radio switch (ARM_MODE below) or to
+  -- motion -- deliberately, rather than guessing. An unmarked ArduPilot mode name
+  -- means either "armed" or "disarmed, option off", and those are not
+  -- distinguishable; home, the trip and the timer all key off the arm edge, so
+  -- inventing one is worse than admitting there is no source. See readArmed.
   ARM_SENSORS   = { "FM", "Fmod", "Flight mode" },
 }
 
@@ -254,6 +312,29 @@ local function distanceM(la1, lo1, la2, lo2)
   local a = s1 * s1 + math.cos(la1 * D2R) * math.cos(la2 * D2R) * s2 * s2
   if a < 0 then a = 0 elseif a > 1 then a = 1 end
   return EARTH * 2 * atan2(math.sqrt(a), math.sqrt(1 - a))
+end
+
+-- "Has it moved at least `m` meters?" -- a THRESHOLD test, not a measurement.
+--
+-- Deliberately not distanceM. That one is a haversine: two sines, two cosines, a
+-- square root and an atan2, which is the right tool for the distance and trip
+-- READOUTS because those numbers are shown to the pilot. This one is asked once
+-- per frame by the QR trigger, where the answer is a yes/no about a few meters --
+-- and paying haversine for it measured 4 ticks on EVERY frame, build or not.
+--
+-- Equirectangular instead: scale the longitude difference by cos(latitude) and
+-- treat the little patch as flat. Over the distances this gate cares about the
+-- error is parts per million -- orders of magnitude below the GPS noise the
+-- threshold exists to reject -- and it degrades only near the poles, where it
+-- under-reports and so merely delays a rebuild.
+--
+-- Compared SQUARED, so there is no square root either: one cosine and a handful
+-- of multiplies. Both sides are in radians of arc, hence the m / EARTH.
+local function movedAtLeast(la1, lo1, la2, lo2, m)
+  local dLat = (la2 - la1) * D2R
+  local dLon = (lo2 - lo1) * D2R * math.cos(la1 * D2R)
+  local lim  = m / EARTH
+  return (dLat * dLat + dLon * dLon) >= (lim * lim)
 end
 
 -- Initial great-circle bearing from point 1 to point 2, as a compass bearing.
@@ -313,12 +394,29 @@ end
 --  the PH_* phases and the job table J further down).
 -- ---------------------------------------------------------------------------
 -- Work per frame, in the same "ticks" the watchdog counts (1 tick = 200 VM
--- instructions, budget = 100). Drawing the screen costs ~20 on its own, and a
--- slice may overshoot by one unit (see the "first" rule in qrStep), so the worst
--- case is roughly draw + QR_SLICE + the dearest phase. Measured at this setting:
--- worst frame 59 of 100, whole code built in ~1 s. Bigger = finishes in fewer
--- frames, smaller = more headroom. See PH_COST below.
-local QR_SLICE = 20
+-- instructions, budget = 100). A slice may overshoot by one unit (see the
+-- "first" rule in qrStep), so the worst frame is roughly draw + QR_SLICE + the
+-- dearest phase.
+--
+-- 30 IS A WALL-CLOCK SETTING, NOT A CPU ONE, and that is worth understanding
+-- before changing it. EdgeTX does not call refresh() at the display rate: it was
+-- measured on the radios at ~11-13 Hz idle, so a frame is ~145 ms on an MK3 and
+-- ~177 ms on an MK2 (Snapshots/FPSTEST-*, and Tests/qr_options_probe.py). That
+-- period is paid ONCE PER FRAME whatever the frame contains -- so the build costs
+-- FRAMES, not ticks, and a bigger slice buys real seconds by needing fewer of
+-- them. At 20 the rebuild took 32 frames (4.6 s on an MK3, 5.7 s on an MK2, both
+-- confirmed against the radios); at 30, with the function patterns cached, it
+-- takes 22 -- 3.2 s and 3.9 s -- for six points of peak. Worst frame measured
+-- in continuous flight, every sensor present and a code on screen: 67 of 100
+-- (69 on some fix/build alignments). Parked, with a code up and no build
+-- running, it is 36. See Tests/profile_frames.py, which sweeps the alignment.
+--
+-- The MK2 is CPU-bound (its refresh rate falls 42% between an idle frame and a
+-- 60%-loaded one) while the MK3 holds a flat period, so the same slice buys less
+-- on the MK2. Both still gain.
+--
+-- Bigger = finishes in fewer frames, smaller = more headroom. See PH_COST below.
+local QR_SLICE = 30
 
 local function getbit(x, i) return floor(x / POW2[i]) % 2 end
 
@@ -467,6 +565,26 @@ local PH_XOR, PH_GF, PH_MATRIX, PH_PATTERN, PH_ENCODE, PH_PACK,
 -- uses these to pack a frame without overshooting; re-measure if a phase changes.
 local PH_COST = { 5, 12, 1, 16, 8, 16, 18, 9, 1, 2 }
 
+-- THE FUNCTION PATTERNS ARE THE SAME IN EVERY CODE THIS WIDGET WILL EVER BUILD.
+-- Version 3 and mask 2 are both fixed, so the finders, the timing lines, the
+-- alignment block and the format bits land on identical cells every time -- and
+-- PH_PLACE only writes cells the function mask leaves free. Computing them again
+-- per rebuild cost 93 of the ~558 ticks of build work. Measured both ways with
+-- the snapshot disabled: 26 frames and a 68-tick peak without it, 22 and 64 with
+-- -- so it is worth four frames of wall clock (0.58 s on an MK3, 0.71 s on an
+-- MK2) and four points of peak, on every single rebuild.
+--
+-- So the first build keeps a copy and every later one starts from it.
+--   QTMPL   the post-pattern matrix. COPIED per build, never shared: PH_PLACE
+--           and PH_MASK write into the matrix, so handing out the original would
+--           corrupt every code after the first.
+--   QFMASK  the function mask. SHARED, because nothing writes it after the
+--           patterns are laid down -- the second q_format at the end of PH_MASK
+--           only rewrites cells it already set to the same values.
+-- Neither depends on the payload or the model, so neither is ever invalidated;
+-- they outlive a model change on purpose (checkModel drops the JOB, not these).
+local QTMPL, QFMASK = nil, nil
+
 local J = nil                      -- current job, nil when idle
 local function qrBusy() return J ~= nil end
 
@@ -508,9 +626,25 @@ local function qrStep()
 
     elseif ph == PH_MATRIX then                -- 29 blank rows
       if J.i == 0 then J.m, J.f = {}, {} end
-      q_blankRow(J.m, J.f, J.i)
+      if QTMPL then
+        local src, row = QTMPL[J.i], {}
+        for x = 0, QSIZE - 1 do row[x] = src[x] end
+        J.m[J.i] = row
+      else
+        q_blankRow(J.m, J.f, J.i)
+      end
       J.i = J.i + 1
-      if J.i >= QSIZE then J.phase, J.i = PH_PATTERN, 0 end
+      if J.i >= QSIZE then
+        if QTMPL then
+          -- the patterns are already in the copied rows: skip PH_PATTERN
+          J.f = QFMASK
+          J.phase, J.i, J.bits = PH_ENCODE, 0, {}
+          putBits(J.bits, 4, 4)                -- byte mode
+          putBits(J.bits, #J.text, 8)          -- length
+        else
+          J.phase, J.i = PH_PATTERN, 0
+        end
+      end
 
     elseif ph == PH_PATTERN then               -- function patterns, 4 sub-steps
       local m, f = J.m, J.f
@@ -528,6 +662,19 @@ local function qrStep()
       end
       J.i = J.i + 1
       if J.i > 3 then
+        -- Keep what this cost, for every rebuild from here on. Done in one go
+        -- rather than sliced: it is 29 rows, once per session, and it happens on
+        -- the FIRST build, whose frames are the cheapest of any (there is no code
+        -- on screen to draw yet).
+        if QTMPL == nil then
+          QTMPL = {}
+          for y = 0, QSIZE - 1 do
+            local s, d = m[y], {}
+            for x = 0, QSIZE - 1 do d[x] = s[x] end
+            QTMPL[y] = d
+          end
+          QFMASK = f
+        end
         J.phase, J.i, J.bits = PH_ENCODE, 0, {}
         putBits(J.bits, 4, 4)                  -- byte mode
         putBits(J.bits, #J.text, 8)            -- length
@@ -628,9 +775,19 @@ local function newState() return {
   lat = 0, lon = 0,
   stale = false,   -- RF link down: model-sourced readings are frozen, gray them
   spdKmh = 0, hdg = 0,
-  altMsl = nil, altRelFC = nil, altRel = nil,
+  -- altFC is the INPUT (the FC's altitude, datum unknown); altMsl is the OUTPUT
+  -- (the sea-level figure to display, nil until it can be justified). Keeping
+  -- them separate is deliberate: altMsl used to be both, which produced two
+  -- runaway-divergence bugs where the rebuild fed on itself.
+  altFC = nil, altMsl = nil, altRel = nil,
   fcINav = nil,    -- firmware family, proven from the flight-mode string (identifyFC)
-  homeAltM = nil,  -- launch reference that MOVES with the sensor's datum
+  fcArdu = false,  -- narrower than fcINav: specifically ArduPilot (see AP_MODES)
+  modeTxt = nil,   -- the MODE pill's text: the FC's flight-mode string, marker off
+  -- Has a marker character ever been seen on THIS model? On Betaflight and INAV
+  -- that is uninteresting, but on ArduPilot the disarm marker is OPT-IN
+  -- (CRSF_FM_DISARM_STAR), and this is the only thing that tells "no marker =
+  -- armed" apart from "no marker = the option is off". See readArmed.
+  markerSeen = false,
   homeMsl  = nil,  -- launch elevation, captured disarmed, never shifted
   mslZeroed = false, -- FC re-datumed the GPS altitude at arm (BF 4.3-4.5)
   fcAltIsMsl = false, -- proven: this model's FC altitude reads MSL while disarmed
@@ -646,14 +803,21 @@ local function newState() return {
   cog = nil,       -- course over ground, computed from consecutive GPS fixes
   maxDist = 0, maxAlt = 0, maxSpeed = 0,
   maxMsl = nil,    -- highest MSL reached; nil while MSL was never known
-  rssi = nil, lq = nil, pwr = nil, mode = nil, rxbt = nil, mah = nil, telem = false,
+  rssi = nil, lq = nil, pwr = nil, rxbt = nil, mah = nil, telem = false,
+  -- The ELRS RF mode INDEX, drawn as a packet rate in the strip's RATE cell.
+  -- Named rfMode, not mode: st.modeTxt beside it is the FLIGHT mode, and one
+  -- screen with two unrelated things called "mode" is how the strip cell came
+  -- to be renamed from MODE to RATE in the first place.
+  rfMode = nil,
   battPct = nil,
   battMin = battRange.min or CFG.BATT_MIN, battMax = battRange.max or CFG.BATT_MAX,
   -- The finished QR is kept ONLY as draw runs (see PH_RUNS): that is all the
   -- drawing needs, and holding the 29x29 boolean matrix as well would pin 29
   -- extra tables for nothing. qrRuns ~= nil IS the "we have a code" flag.
-  qrRuns = nil, qrText = "",
-  qrCapTime = nil,
+  qrRuns = nil,
+  -- The position the CURRENT code encodes. nil = no code yet. This is what
+  -- the rebuild trigger measures against (see CFG.QR_MIN_MOVE).
+  qrLat = nil, qrLon = nil,
   L = nil,                          -- cached layout (see getLayout)
 } end
 
@@ -842,13 +1006,13 @@ local function readSensors()
   st.stale = linkKnown and (rssiNow == nil) and ((st.lq or 0) <= 0)
 
   -- These HOLD their last real reading; st.stale tells the UI to gray them.
-  -- TX POWER and MODE hold too: they only ever reach the radio INSIDE the link
+  -- TX POWER and RATE hold too: they only ever reach the radio INSIDE the link
   -- statistics frame, so once that stops we cannot know them -- and ELRS dynamic
   -- power does change them behind our back (observed: the TX went 10 mW ->
   -- 1000 mW on link loss while the widget still showed 10 mW).
   st.rssi = rssiNow or st.rssi
   st.pwr  = fresh(svNum(sv("TPWR"))) or st.pwr
-  st.mode = fresh(svNum(sv("RFMD"))) or st.mode
+  st.rfMode = fresh(svNum(sv("RFMD"))) or st.rfMode
   st.rxbt = fresh(svNum(sv("RxBt"))) or st.rxbt
 
   -- ---------------------------------------------------------------------------
@@ -885,23 +1049,67 @@ local function readSensors()
     if fix then st.lat = gps.lat; st.lon = gps.lon end
 
     st.spdKmh = (svNum(svAny(CFG.SPD_SENSORS)) or 0) * CFG.SPEED_TO_KMH
-    local mslRaw = svNum(svAny(CFG.ALT_MSL_SENSORS))
-    st.altMsl = mslRaw and (mslRaw * CFG.ALT_TO_M) or nil
-    local relRaw = svNum(svAny(CFG.ALT_REL_SENSORS))
-    st.altRelFC = relRaw and (relRaw * CFG.ALT_TO_M) or nil
+    -- =====================================================================
+    --  ONE FC ALTITUDE, whatever this radio happens to call it.
+    --
+    --  EdgeTX RENAMED the CRSF GPS altitude in 2.12.0. Same frame, same bytes,
+    --  same decode -- only the sensor's NAME changed, which is why one aircraft
+    --  presents differently on two radios. From the crossfireSensors table in
+    --  radio/src/telemetry/crossfire.cpp:
+    --
+    --    2.8 - 2.11   {GPS_ID,      4, STR_SENSOR_ALT,    UNIT_METERS, 0}
+    --                 {BARO_ALT_ID, 0, STR_SENSOR_ALT,    UNIT_METERS, 2}
+    --    2.12+     CS(GPS_ID,      4, STR_DEF(STR_SENSOR_GPSALT), UNIT_METERS, 0)
+    --              CS(BARO_ALT_ID, 0, STR_DEF(STR_SENSOR_ALT),    UNIT_METERS, 2)
+    --
+    --  Both releases decode it identically --
+    --  processCrossfireTelemetryValue(GPS_ALTITUDE_INDEX, value - 1000) -- so
+    --  "GAlt" on 2.12+ and "Alt" on 2.8-2.11 are the SAME NUMBER. Verified in
+    --  the source: v2.11.0 contains no STR_SENSOR_GPSALT at all, v2.12.0 does.
+    --
+    --  What is NOT the same: on 2.12+ `Alt` is BARO_ALT_ID, a different frame at
+    --  2 decimals. So the rule keys on PRESENCE, never on the name:
+    --
+    --    GAlt present -> that is the GPS altitude. An `Alt` beside it is the
+    --                    BAROMETER, a different quantity, and is not used: the
+    --                    height and the MSL figure are then derived from one
+    --                    source, so they cannot disagree with each other.
+    --    GAlt absent  -> `Alt` is the only altitude this model sends, and on
+    --                    2.8-2.11 it IS that same GPS field under its old name.
+    --
+    --  ONE input, therefore ONE set of guards. This used to be two fields
+    --  (altMsl from GAlt, altRelFC from Alt) down two separate paths, so the
+    --  jump detector and the GPS cross-check ran on an MK2 and not on an MK3 --
+    --  for the same quad, same telemetry. See Tests/disarm_race_repro.py.
+    --
+    --  2.8-2.11 WITH a barometer is unresolvable, and always was: EdgeTX writes
+    --  both frames to the same `Alt` sensor (the two STR_SENSOR_ALT rows above),
+    --  so nothing downstream of EdgeTX can separate them either.
+    -- =====================================================================
+    local gpsRaw  = svNum(svAny(CFG.ALT_MSL_SENSORS))   -- GAlt: GPS altitude
+    local baroRaw = svNum(svAny(CFG.ALT_REL_SENSORS))   -- Alt: baro, or the same
+                                                        -- GPS field on 2.8-2.11
+    local altRaw = gpsRaw
+    if altRaw == nil then altRaw = baroRaw end
+    st.altFC = altRaw and (altRaw * CFG.ALT_TO_M) or nil
+    -- The VALUE is unified above; its PROVENANCE is not, and that difference is
+    -- real. A sensor called `GAlt` is EdgeTX telling us the number came from
+    -- GPS_ID sub-field 4 -- so it is a sea-level altitude by construction, and
+    -- needs no further proof. `Alt` says no such thing: on 2.12+ it is the
+    -- barometer and on 2.8-2.11 it is whichever frame arrived, so a reading from
+    -- it has to EARN the MSL label at runtime (the disarmed-geometry test below).
+    -- Erasing that distinction cost the MSL line at every field under
+    -- ALT_JUMP_M, because a 40 m elevation cannot pass a >100 m test.
+    if gpsRaw ~= nil and not st.fcINav then st.fcAltIsMsl = true end
     -- INAV sends ONE altitude and it is height above the position estimator's
     -- origin -- getEstimatedActualPosition(Z) in its telemetry/crsf.c, unchanged
     -- from 4.0.0 through 9.0.0. That is a RELATIVE reading at every moment, armed
     -- or not, which is why an INAV model reads 0 m on the ground however high the
-    -- field is, and why it never re-datums at arm the way Betaflight does.
-    -- There is no MSL anywhere in INAV's CRSF telemetry. So whichever name this
-    -- radio discovered the sensor under, move it to the relative slot and leave
-    -- no MSL source at all: an FC that cannot tell us the elevation must not
-    -- appear to. (Rule 1 -- never show what cannot be known.)
-    if st.fcINav and st.altMsl ~= nil then
-      st.altRelFC = st.altRelFC or st.altMsl
-      st.altMsl   = nil
-    end
+    -- field is, and why it never re-datums at arm the way Betaflight does. There
+    -- is no MSL anywhere in INAV's CRSF telemetry, so the reading may never be
+    -- promoted to the MSL line however absolute it looks. (Rule 1 -- never show
+    -- what cannot be known.) The single input above is unaffected: the height
+    -- above take-off is still altFC minus the reference taken at arming.
     st.hdg    = compassDeg(svNum(svAny(CFG.HDG_SENSORS)) or 0)
     -- mAh drawn belongs HERE, not with the link statistics above, and it must
     -- NOT go through fresh(): that helper reads 0 as "no reading", which is
@@ -1000,7 +1208,7 @@ local INAV_DISARMED = { OK = true, WAIT = true, ["!ERR"] = true }
 -- bookkeeping. See the armWarn line in updateLogic.
 local FM_BLOCKED = { ["!ERR"] = true }
 
--- Modes only INAV has. Not needed to recognise a disarmed model -- the table
+-- Modes only INAV has. Not needed to recognize a disarmed model -- the table
 -- above does that on the first frame, and disarmed is how a model starts -- but
 -- these identify the firmware when the widget comes up with the model ALREADY
 -- flying (a mid-flight model or screen change). Betaflight's own additions
@@ -1012,6 +1220,66 @@ local FM_BLOCKED = { ["!ERR"] = true }
 local INAV_ARMED = {
   HRST = true, HOLD = true, CRUZ = true, CRSH = true, WP   = true, AH   = true,
   ANGH = true, LOTR = true, TURT = true, WRTH = true, GEO  = true, LAND = true,
+}
+
+-- ---------------------------------------------------------------------------
+--  ARDUPILOT mode names -- Mode::name4(), the exact string that reaches the
+--  radio. The chain is: the vehicle calls
+--      notify.set_flight_mode_str(flightmode->name4())   (ArduCopter/mode.cpp)
+--  into a char[5] (AP_Notify.h -- four characters plus the terminator), and
+--  AP_CRSF_Telem.cpp calc_flight_mode() sends it verbatim. Used ONLY to
+--  recognize the firmware; altitude needs no ArduPilot path, because it sends the
+--  GPS's own location.alt over the standard CRSF GPS frame -- genuine MSL, never
+--  re-datumed at arm, the same shape as Betaflight master/5.x -- so an ArduPilot
+--  model lands in exactly the same "not INAV" bucket as a Betaflight one.
+--
+--  GENERATED FROM SOURCE, NOT BY HAND. It is every name4() in ArduCopter,
+--  ArduPlane, Rover and ArduSub master (51 of them) MINUS every name any other
+--  firmware also sends. That subtraction is the whole safety property, because a
+--  name shared with another firmware would misidentify it:
+--
+--  "EVERY OTHER FIRMWARE" INCLUDES EVERY VERSION OF IT. Betaflight renamed its
+--  whole ladder after 4.5 -- STAB became ANGL, MANU became PASS, and ALTH/POSH/
+--  CHIR appeared -- so master's list is NOT the set of names Betaflight sends.
+--  The names below are the union across bf_crsf.c (master) and the 4.3/4.4/4.5
+--  reference copies:
+--
+--    ACRO   sent by Betaflight (its DEFAULT, `const char *flightMode = "ACRO"`)
+--           AND by INAV.
+--    ALTH   sent by Betaflight master.
+--    POSH   sent by Betaflight master.
+--    STAB   sent by Betaflight 4.3-4.5 -- their name for ANGLE mode, which is
+--           most pilots' everyday mode on the versions most pilots are flying.
+--    HOLD   sent by INAV.
+--    LAND   sent by INAV.
+--    MANU   sent by INAV, and by Betaflight 4.3-4.5 for PASSTHRU. Two independent
+--           reasons, either one sufficient. This is the dangerous class:
+--           misreading an INAV plane in MANUAL as ArduPilot would let the MSL
+--           machinery loose on INAV's relative altitude and FABRICATE a sea-level
+--           figure. Rule 1.
+--
+--  Getting this wrong is not theoretical, and all three of these shipped in some
+--  form: ACRO and MANU were in the contributed version of this table, and STAB
+--  survived our own first review because the collision check read master alone.
+--  ACRO made a Betaflight quad joined mid-flight read DISARMED; STAB did the same
+--  to a 4.5 quad in ANGLE; MANU would have put a false MSL on an INAV plane. All
+--  pinned by ardupilot_test.
+--
+--  Losing seven names costs nothing: 44 remain, every vehicle passes through
+--  AUTO/LOIT/RTL/GUID and the rest, so identification arrives on the next mode
+--  change at the latest. RTL appears twice on purpose -- Copter and Plane pad it
+--  to four bytes as "RTL " while Rover sends "RTL".
+--
+--  To regenerate after an ArduPilot release: Tests/ardupilot_modes.py.
+local AP_MODES = {
+  ALND = true, AROT = true, ATUN = true, AUTO = true, AVOI = true, BRAK = true,
+  CIRC = true, CRUS = true, DETE = true, DOCK = true, DRIF = true, FBWA = true,
+  FBWB = true, FHLD = true, FLIP = true, FOLL = true, GNGP = true, GUID = true,
+  INIT = true, L2QL = true, LOIT = true, PHLD = true, QACO = true, QATN = true,
+  QHOV = true, QLND = true, QLOT = true, QRTL = true, QSTB = true, RTL = true,
+  ["RTL "] = true, SMPL = true, SPRT = true, SRTL = true, STER = true, STRK = true,
+  SURF = true, SYSI = true, THML = true, THRW = true, TKOF = true, TRAN = true,
+  TRTL = true, ZIGZ = true,
 }
 
 -- One marker character, and never part of a mode name except in "!FS!".
@@ -1028,7 +1296,16 @@ end
 -- so it is re-proven per model rather than per session.
 local function identifyFC(fm)
   if st.fcINav ~= nil then return end                    -- already settled
-  if INAV_DISARMED[fm] or INAV_ARMED[fm] then
+  -- Strip a marker before matching AP_MODES: ArduPilot's own opt-in marker is
+  -- the same '*' byte Betaflight uses, so a starred mode ("STAB*") still has to
+  -- match its bare name. INAV is matched on the WHOLE string because INAV never
+  -- appends anything -- a marker rules it out by itself.
+  local mark = armMarker(fm)
+  local base = (mark ~= nil) and string.sub(fm, 1, -2) or fm
+  if AP_MODES[base] then
+    st.fcArdu = true
+    st.fcINav = false          -- same altitude bucket as Betaflight, see AP_MODES
+  elseif INAV_DISARMED[fm] or INAV_ARMED[fm] then
     st.fcINav = true
     -- readSensors runs a frame ahead of this, so an INAV model's relative
     -- altitude has already been through the MSL machinery once. Everything it
@@ -1036,7 +1313,7 @@ local function identifyFC(fm)
     -- carry it into the flight.
     st.altMsl,  st.mslGround, st.mslCand,   st.mslCandT = nil, nil, nil, nil
     st.homeMsl, st.maxMsl,    st.fcAltIsMsl, st.mslZeroed = nil, nil, false, false
-  elseif armMarker(fm) ~= nil then
+  elseif mark ~= nil then
     st.fcINav = false                                    -- Betaflight-style marker
   end
 end
@@ -1050,6 +1327,33 @@ local function readArmed()
   -- Identify BEFORE the ARM_MODE branch: a pilot who arms from a radio switch
   -- still needs the altitude routed correctly for their firmware.
   if fm ~= nil then identifyFC(fm) end
+
+  -- The MODE pill's text, computed before every early return below so that all
+  -- of them -- including the radio-switch path and the failsafe path -- leave it
+  -- set. It is the FC's string VERBATIM except for the arming marker, which is a
+  -- separate field the FC appends and which the ARM pill has already consumed.
+  -- No translation: "!FS!" stays "!FS!". The widget does not know a better word
+  -- for what the flight controller just said about itself.
+  --
+  -- Living inside readArmed is what makes the pill HOLD on a dropout: updateLogic
+  -- only calls this while st.telem, so a dead link cannot rewrite the string, and
+  -- the pill keeps its last value like the two pills beside it. (drawHeader grays
+  -- it while stale -- but only when it would have been blue. See there.)
+  if fm == nil then
+    st.modeTxt = nil                             -- no FM sensor on this model
+  else
+    local t = (armMarker(fm) ~= nil) and string.sub(fm, 1, -2) or fm
+    -- ArduPilot pads name4() to four bytes, so Copter and Plane send "RTL "
+    -- where Rover sends "RTL". Trim it, or the pill draws a phantom character
+    -- and MODE_ALERT misses the padded spelling.
+    while string.sub(t, -1) == " " do t = string.sub(t, 1, -2) end
+    -- Guard, not a policy: everything all three firmwares send is already four
+    -- characters or fewer. This is what keeps a firmware we have never seen from
+    -- overrunning a pill whose width was fixed at layout time.
+    if string.len(t) > 4 then t = string.sub(t, 1, 4) end
+    if t == "" then t = nil end
+    st.modeTxt = t
+  end
 
   if CFG.ARM_MODE ~= "auto" then                 -- an explicit radio switch wins
     local v = svNum(sv(CFG.ARM_MODE))
@@ -1072,10 +1376,26 @@ local function readArmed()
     -- ...with one exception for the mode NAME: Betaflight 4.3 has no '!' marker
     -- (it writes '*' unconditionally when disarmed) and signals arming-disabled
     -- as "!ERR*" instead. "WAIT*" is NOT such a case -- see FM_BLOCKED.
+    --
+    -- ArduPilot takes this branch too: with CRSF_FM_DISARM_STAR enabled it sends
+    -- '*', and only while disarmed. A marker of any kind, on any firmware, is
+    -- standing proof that the marker convention is live on this model -- which is
+    -- the only thing that makes the no-marker case below mean ARMED rather than
+    -- "the option is switched off".
+    st.markerSeen = true
     return "disarmed", mark == "!" or FM_BLOCKED[string.sub(fm, 1, -2)] == true
   end
-  -- No marker: either INAV, or an ARMED Betaflight.
+  -- No marker. On Betaflight and INAV this is unambiguous: INAV never marks, and
+  -- Betaflight marks only while disarmed, so no marker there IS armed.
   if INAV_DISARMED[fm] then return "disarmed", FM_BLOCKED[fm] == true end
+  -- On ArduPilot it is NOT unambiguous, because the marker is opt-in
+  -- (CRSF_FM_DISARM_STAR, see CFG.ARM_SENSORS): an unmarked mode name means
+  -- either "armed" or "disarmed with the option off", and Rule 1 says an honest
+  -- "no source" beats guessing between them -- returning nil hands the model to
+  -- the ARM_MODE chain (a radio switch, then motion) instead of inventing an arm
+  -- edge that would move home, the trip and the timer. Once a marked frame has
+  -- been seen the option is proven on, and this reads exactly like Betaflight.
+  if st.fcArdu and not st.markerSeen then return nil, false end
   return "armed", false
 end
 
@@ -1101,54 +1421,56 @@ end
 -- ---------------------------------------------------------------------------
 --  HEIGHT ABOVE TAKE-OFF, and the MSL figure that goes beside it.
 --
---  CALL ONLY WITH A LIVE LINK. st.altMsl is both an INPUT here and the OUTPUT of
---  the rebuild at the end, and readSensors stops refreshing it from the sensor
---  during a dropout -- so running this while stale makes the rebuild feed on
---  itself. Measured on a GAlt-only radio: a frozen 120 m climbed past 4 km in six
---  frames, gaining the launch elevation every frame. A dropout has to FREEZE the
---  altitude; it is the number you walk out to the field with.
+--  CALL ONLY WITH A LIVE LINK. readSensors stops refreshing st.altFC during a
+--  dropout, so a frozen reading would be re-derived against a moving reference
+--  every frame. Measured before the guard: a frozen 120 m climbed past 4 km in
+--  six frames, gaining the launch elevation each time. A dropout has to FREEZE
+--  the altitude; it is the number you walk out to the field with.
 -- ---------------------------------------------------------------------------
 local function deriveAltitude()
-  -- Prefer the flight controller's own height -- responsive, and already
-  -- cross-checked against GPS by the time this runs: updateLogic calls this from
-  -- partway down its own body, AFTER the reference-change detection and the GPS
-  -- cross-check but BEFORE distance, trip and the maxima. So what the comments
-  -- here call "above" is above in EXECUTION order while sitting further down the
-  -- FILE. Otherwise derive it from GPS altitude against the
-  -- reading recorded at the home point. Never both -- that would subtract the
-  -- launch altitude twice. Which branch runs is decided by the radio's EdgeTX
-  -- version as much as by the aircraft: see the note on ALT_MSL_SENSORS.
-  -- ("The FC's own height" is not necessarily barometric: a model with no baro
-  -- sends an estimator or GPS-derived figure under the same sensor name, which
-  -- is precisely why none of this trusts what the number MEANS without proof.)
-  if st.altRelFC ~= nil then
-    st.altRel = st.altRelFC - (st.altRefFC or 0)
-  elseif st.altMsl ~= nil and st.homeAltM ~= nil then
-    st.altRel = st.altMsl - st.homeAltM
+  -- ONE source, so ONE subtraction. altRefFC is whatever the FC read at the
+  -- moment of arming -- the model was on the ground then, so that reading IS
+  -- zero height, whether the FC reports relative (Betaflight zeroes at arm, so
+  -- the reference is ~0 and this changes nothing) or absolute (this is what
+  -- stops the card showing height above SEA LEVEL). The reference is kept
+  -- honest across a datum change by the jump detector in updateLogic, which
+  -- runs BEFORE this and shifts altRefFC by the same step -- so what the
+  -- comments here call "above" is above in EXECUTION order while sitting
+  -- further down the FILE.
+  if st.altFC ~= nil then
+    st.altRel = st.altFC - (st.altRefFC or 0)
   else
     st.altRel = nil
   end
 
-  -- No GPS-altitude sensor, but the FC's source has been shown to be absolute
-  -- (st.altFCAbs, set by the reference-change detection in updateLogic)? Then it
-  -- IS the MSL figure, so the card can show it after all.
-  if st.altMsl == nil and st.altFCAbs and st.altRelFC ~= nil then
-    st.altMsl = st.altRelFC
-  end
-
-  -- REBUILD the MSL figure when the sensor has been re-datumed out from under us
-  -- (Betaflight zeroes its altitude estimate at arm, which is how the card came to
-  -- read "0 m MSL" beside 49 m of altitude). The launch elevation was measured
-  -- before arming and never moves, so elevation + height is the honest answer.
+  -- THE MSL FIGURE IS AN OUTPUT, computed here and nowhere else. It is only
+  -- claimed when it can be justified, because a firmware reporting
+  -- height-above-boot reads ~0 on the ground and calling that "0 m MSL" would be
+  -- a confident falsehood.
   --
-  -- ARMED ONLY: that is the whole window in which the sensor means height rather
-  -- than elevation. Disarmed it is honest again -- and on a radio with no
-  -- GPS-altitude sensor it has already been promoted straight from the FC value,
-  -- so rebuilding here would double-count. When the sensor never re-datums,
-  -- mslZeroed stays false and the raw reading is left exactly as it came in:
-  -- real GPS altitude is independent evidence and beats anything derived.
-  if st.armed and st.mslZeroed and st.homeMsl ~= nil and st.altRel ~= nil then
-    st.altMsl = st.homeMsl + st.altRel
+  -- Not on INAV at any time: its altitude is height above the estimator origin
+  -- armed or not, so no amount of evidence makes it a sea-level figure.
+  st.altMsl = nil
+  if not st.fcINav then
+    if st.armed and st.mslZeroed and st.homeMsl ~= nil and st.altRel ~= nil then
+      -- The FC re-datumed at arm, so the raw reading is a height. The launch
+      -- elevation was measured before arming and never moves: elevation + height
+      -- is the honest answer. (Betaflight 4.3-4.5, flight/position.c.)
+      st.altMsl = st.homeMsl + st.altRel
+    elseif (st.fcAltIsMsl or st.altFCAbs) and st.altFC ~= nil then
+      -- The reading is known absolute -- from the sensor's own name, the
+      -- disarmed-geometry test, or the jump detector watching it revert. Real
+      -- altitude beats anything derived, so use it as it came in.
+      st.altMsl = st.altFC
+      -- ...EXCEPT while a big disarmed step is still on probation. Believing the
+      -- reading here and not below would contradict itself, and this is the
+      -- window in which a re-datum arriving just ahead of the arm string would
+      -- otherwise flash "0 m MSL". Hold the elevation we still stand behind.
+      -- (This runs LAST, so it has to re-apply what the sampler decided.)
+      if not st.armed and st.mslCand ~= nil and st.mslGround ~= nil then
+        st.altMsl = st.mslGround
+      end
+    end
   end
 end
 
@@ -1186,17 +1508,18 @@ local function updateLogic(now)
         -- whether the FC reports relative (Betaflight zeroes at arm -> ~0, this
         -- changes nothing) or ABSOLUTE altitude (-> this is what stops the card
         -- showing height above SEA LEVEL).
-        st.altRefFC = st.altRelFC
+        st.altRefFC = st.altFC
         -- Re-baseline the jump detector's previous sample TOO. Betaflight zeroes
         -- the baro altitude on the same arm event, and both telemetry frames can
-        -- land inside one 30 ms refresh -- so the line above would take the new
-        -- zero as the reference, and the detector below would then measure the
-        -- very same drop against the OLD sample and subtract it a second time.
+        -- easily land inside a single refresh -- ~145 ms on an MK3, not the 30 ms
+        -- this once assumed -- so the line above would take the new zero as the
+        -- reference, and the detector below would then measure that very same drop
+        -- against the OLD sample and subtract it a second time.
         -- Seeding it here makes this frame's step exactly 0, while leaving the
         -- detector free to catch a re-datum that arrives on any LATER frame (which
         -- is how the other ordering is handled). Without it, a 681 m -> 0 collapse
         -- coinciding with arming showed 681 m of altitude on the ground.
-        st.altPrevFC = st.altRelFC
+        st.altPrevFC = st.altFC
         st.mslZeroed = false     -- re-detect the GPS re-datum for this flight
         -- Seed the launch elevation NOW from the settled disarmed sample. The full
         -- capture below waits for a locked fix and runs later in this same frame,
@@ -1243,7 +1566,7 @@ local function updateLogic(now)
   -- amount: the displayed height then stays continuous across the switch.
   -- Skipped while the link is down, where a frozen reading would resume with a
   -- legitimately large change.
-  local aFC = st.altRelFC
+  local aFC = st.altFC
   if aFC ~= nil and not st.stale then
     if st.altPrevFC ~= nil and st.altRefFC ~= nil then
       local d = aFC - st.altPrevFC
@@ -1277,12 +1600,12 @@ local function updateLogic(now)
   --  both are handled, and which one you have is worked out below rather than
   --  assumed.
   --
-  --  WHICH SENSOR this arrives as depends on the RADIO, not the aircraft. A model
-  --  with no barometric telemetry sends ONE altitude, discovered as GAlt on
-  --  EdgeTX 2.12+ and as Alt on 2.8-2.11 (verified 2026-07-28: the same Explorer
-  --  showed GAlt only on an MK3 and Alt only on an MK2). So the MSL machinery is
-  --  fed from "st.altMsl or st.altRelFC" -- whichever name this radio knows --
-  --  and both must behave identically. See single_alt_test.
+  --  WHICH SENSOR this arrives as depends on the RADIO, not the aircraft: GAlt on
+  --  EdgeTX 2.12+, Alt on 2.8-2.11 (verified 2026-07-28 -- the same Explorer
+  --  showed GAlt only on an MK3 and Alt only on an MK2). readSensors has already
+  --  collapsed that to the single st.altFC, so everything below is written once
+  --  and cannot behave differently on the two radios. See single_alt_test, and
+  --  disarm_race_repro for what it cost when it could.
   -- ===========================================================================
   --
   -- It is only CLAIMED as MSL where that can be justified, because a firmware
@@ -1294,7 +1617,7 @@ local function updateLogic(now)
   -- is height above the estimator origin whether armed or not, so a disarmed
   -- model reading hundreds of meters is one sitting on a hill it took off from,
   -- not one reporting MSL. See readSensors.
-  if st.altMsl == nil and st.altRelFC ~= nil and not st.fcINav
+  if st.altFC ~= nil and not st.fcINav
      and not st.stale and gpsLock() then
     local absolute
     if not st.armed then
@@ -1308,7 +1631,7 @@ local function updateLogic(now)
       -- is equally consistent with 40 m of elevation and with 40 m of carrying a
       -- powered model uphill, and the widget does not choose between them. The
       -- first arming settles it either way (st.fcAltIsMsl).
-      absolute = st.fcAltIsMsl or st.altRelFC > CFG.ALT_JUMP_M
+      absolute = st.fcAltIsMsl or st.altFC > CFG.ALT_JUMP_M
     else
       -- ARMED, and this flight showed no re-datum: altRefFC was captured at
       -- take-off and homeMsl measured before it, so the two still agreeing means
@@ -1319,7 +1642,7 @@ local function updateLogic(now)
                  and st.homeMsl > CFG.ALT_JUMP_M
                  and abs(st.altRefFC - st.homeMsl) <= CFG.ALT_JUMP_M
     end
-    if absolute then st.altMsl = st.altRelFC end
+    if absolute then st.fcAltIsMsl = true end
   end
   -- The absolute-altitude candidate: the dedicated sensor where the radio has one,
   -- otherwise the FC altitude -- which is what lets the collapse below be SEEN the
@@ -1328,8 +1651,7 @@ local function updateLogic(now)
   -- the whole MSL apparatus off: the launch-elevation sampling, the re-datum
   -- detection and the homeMsl capture are all gated on it, and none of them has
   -- anything to measure on a firmware that never reports an elevation.
-  local mslNow = st.altMsl
-  if mslNow == nil and not st.fcINav then mslNow = st.altRelFC end
+  local mslNow = (not st.fcINav) and st.altFC or nil
 
   if not st.armed and mslNow ~= nil and not st.stale and gpsLock() then
     -- The launch elevation must be sampled while DISARMED -- the only time every
@@ -1389,14 +1711,13 @@ local function updateLogic(now)
     -- reference yet, so it is the raw reading rather than a height. Feeding that in
     -- made arriving at a lower field look like a re-datum.
     local h = 0
-    if st.altRelFC ~= nil and st.altRefFC ~= nil then h = st.altRelFC - st.altRefFC end
+    if st.altFC ~= nil and st.altRefFC ~= nil then h = st.altFC - st.altRefFC end
     if abs(mslNow - h) < abs(mslNow - (st.homeMsl + h)) then
       st.mslZeroed = true
       -- ...and THAT is the proof the disarmed reading was absolute. On a radio
       -- with no GPS-altitude sensor this is the only way to learn it, so remember
       -- it for the session: from now on the MSL line works on the ground too.
       st.fcAltIsMsl = true
-      st.homeAltM   = mslNow     -- the sensor reports height now, not elevation
     end
   end
 
@@ -1404,13 +1725,13 @@ local function updateLogic(now)
     -- take-off capture (see the arm edge above): only ever from a locked fix
     if st.homePending and gpsLock() then
       st.homeLat, st.homeLon, st.homeSet = st.lat, st.lon, true
-      -- TWO references, because they answer different questions:
-      --   homeAltM   moves with the sensor's datum; it is what turns the current
-      --              reading into a height above the launch point.
-      --   homeMsl    is the launch point's REAL elevation, captured while still
-      --              disarmed (when the sensor is honest MSL on every firmware)
-      --              and never shifted, so the MSL readout survives a re-datum.
-      st.homeAltM = mslNow
+      -- ONE reference now: homeMsl, the launch point's REAL elevation, captured
+      -- while still disarmed (when the sensor is honest MSL on every firmware)
+      -- and NEVER shifted afterwards. There used to be a second one, homeAltM,
+      -- that moved with the sensor's datum -- and that drift is exactly what
+      -- turned a disarm-edge race into "MAX ALTITUDE 707 m" at a 713 m field.
+      -- The height above take-off comes from altRefFC instead, which the jump
+      -- detector keeps aligned with whatever datum the FC is currently using.
       -- Prefer the reading taken right now, but only if it still AGREES with the
       -- last disarmed sample. If it has leapt away, the FC re-datumed on the arm
       -- edge and the current value is no longer an elevation -- keep the disarmed
@@ -1429,40 +1750,6 @@ local function updateLogic(now)
       st.homePending = false
     end
 
-    -- CROSS-CHECK the two altitude sources against each other.
-    --
-    -- The frame-to-frame jump detector above only fires on ONE large step seen
-    -- with a live link, which a real flight defeats in two ways: a datum change
-    -- that arrives gradually never trips the threshold, and one that straddles a
-    -- dropout is missed because altPrevFC was discarded. Either way the reference
-    -- is left stale and the card reads the field's MSL elevation as "height".
-    --
-    -- When GPS altitude is available there is a second, datum-STABLE reference:
-    -- GPS MSL minus the MSL captured at home is the height the FC ought to be
-    -- reporting. If the two disagree by more than a jump, the FC has moved its
-    -- datum, so re-baseline from the GPS figure -- which cannot drift, because we
-    -- recorded its home value ourselves. This does not care HOW the datum moved.
-    --
-    -- It corrects TOWARDS GPS truth rather than assuming, so a genuine climb is
-    -- never flattened -- the failure the jump detector was written to avoid.
-    --
-    -- SKIPPED WHILE THE LINK IS DOWN, like the jump detector above -- and here it
-    -- is not merely pointless but unstable. st.altMsl is both an input (the sensor)
-    -- and an output (the re-datum rebuild further down). While live, readSensors
-    -- overwrites it from the sensor every frame and the two never meet. While
-    -- stale it is frozen at the REBUILT value, so this would measure the rebuild
-    -- against itself, shift altRefFC, enlarge altRel, and rebuild a larger figure
-    -- again -- diverging by homeMsl every frame. Measured before the guard: a
-    -- 120 m dropout climbed past 6900 m in ten frames. A dropout is exactly when
-    -- the altitude has to hold still, because it is the number you walk out with.
-    if st.altMsl ~= nil and st.homeAltM ~= nil and st.altRelFC ~= nil
-       and not st.stale then
-      local gpsRel = st.altMsl - st.homeAltM
-      local d = (st.altRelFC - (st.altRefFC or 0)) - gpsRel
-      if d > CFG.ALT_JUMP_M or d < -CFG.ALT_JUMP_M then
-        st.altRefFC = st.altRelFC - gpsRel
-      end
-    end
 
     if not st.stale then deriveAltitude() end
 
@@ -1523,34 +1810,42 @@ local function updateLogic(now)
   end
 end
 
--- Kick off (or restart) an incremental build of the QR for the CURRENT position.
+-- Kick off an incremental build of the QR for the CURRENT position.
 -- This is the only heavy operation in the widget: the work happens in qrStep(),
 -- one slice per frame, so no single refresh() blows the CPU budget.
-local function captureQR(now)
+--
+-- The position being encoded is recorded HERE, at the start of the build rather
+-- than at its end. It is what the next frame measures against, and a build takes
+-- ~31 frames -- so recording it on completion would let the trigger fire again
+-- for movement this build is already encoding.
+local function captureQR()
   if not gpsLock() then return false end
   local txt = CFG.QR_URL .. coordQR(st.lat) .. "," .. coordQR(st.lon)
-  if st.qrRuns ~= nil and txt == st.qrText then
-    st.qrCapTime = now                 -- already have this exact code
-    return true
-  end
   if not qrBegin(txt) then return false end
-  st.qrCapTime = now                   -- start the refresh clock now, not on finish
+  st.qrLat, st.qrLon = st.lat, st.lon
   return true
 end
 
 -- Called only when the screen is visible (never in background), so the QR never
 -- burns CPU while you are looking at another telemetry page.
-local function updateQR(now)
-  if gpsLock() and not qrBusy()
-     and (st.qrCapTime == nil or (now - st.qrCapTime) >= CFG.QR_REFRESH * 100) then
-    captureQR(now)
+local function updateQR()
+  -- EVENT-DRIVEN: rebuild when the model has moved, not on a timer. `qrBusy`
+  -- is what keeps this bounded -- a build cannot be started while one is
+  -- running, so the build duration is the rate limit and no minimum interval
+  -- is needed. See CFG.QR_MIN_MOVE for why it is a distance and not a new fix.
+  if gpsLock() and not qrBusy() then
+    if st.qrLat == nil then
+      captureQR()                      -- no code yet: build at the first lock
+    elseif movedAtLeast(st.lat, st.lon, st.qrLat, st.qrLon, CFG.QR_MIN_MOVE) then
+      captureQR()
+    end
   end
   -- Advance an in-progress build by ONE slice, and publish it on the frame that
   -- finishes. (This was a stepQR() of its own: one caller, and a name one word
   -- order away from the qrStep() it wrapped, which is how the wrong one gets
   -- edited.)
   local r = qrStep()
-  if r ~= nil and r ~= "working" then st.qrRuns, st.qrText = r.runs, r.text end
+  if r ~= nil and r ~= "working" then st.qrRuns = r.runs end
 end
 
 -- ---------------------------------------------------------------------------
@@ -1654,7 +1949,9 @@ local function textSize(s, font)
   return lcd.sizeText(s, font)
 end
 
--- ELRS/CRSF RF-mode (RFMD) index -> packet-rate label. The index ranges are
+-- ELRS/CRSF RF-mode (RFMD) index -> packet-rate label, drawn in the strip's RATE
+-- cell. (The cell was called MODE until the header gained a flight-MODE pill and
+--  one screen could not have two things called that.) The index ranges are
 -- distinct per firmware, so the raw value self-identifies what's installed:
 --   1-14 = ELRS 3.x   |   20-33 = ELRS 4.x   |   100+ = ELRS 4.x Gemini/dual-band
 local RF_MODE = {
@@ -1672,6 +1969,45 @@ local RF_MODE = {
 -- drawHeader.
 local PILL_TEXTS = { "NO GPS", "NO FIX", "ACQUIRING", "GPS LOCK", "ARMED",
                      "DISARMED", "BLOCKED" }
+
+-- ---------------------------------------------------------------------------
+--  The MODE pill -- the header's third pill, which shows the FC's own
+--  flight-mode string. Two small pieces of data.
+--
+--  MODE_REF sizes it. The pill is a FIXED width, measured once from the widest
+--  four-character string any supported firmware can send, so it never resizes
+--  and the model name beside it never moves. Four characters is not a house
+--  rule, it is what the wire carries: ArduPilot's Mode::name4() writes into a
+--  char[5] (AP_Notify.h) and Betaflight and INAV pick from short literals.
+--  "MANU" is the widest on both font sets (38 px at 480, 51 px at 800) --
+--  Tests/mode_pill_probe.py measures every string of all three firmwares.
+local MODE_REF = "MANU"
+
+--  MODE_ALERT: the strings that earn amber. The rule is "the model is flying
+--  itself somewhere and you may not have asked" -- every one of these is a
+--  return-to-home under some name -- plus "!ERR", which is the FC refusing to
+--  arm and announcing it with a '!' of its own.
+--
+--  This is a mode-name table, and this project has learned to distrust those
+--  (see AP_MODES, and the STAB collision it took a second pass to find). It is
+--  acceptable HERE, and only here, because it cannot do harm: it feeds a COLOR
+--  and nothing else. A missing entry costs a highlight; a wrong entry paints
+--  amber where blue belonged. Neither can move an arm edge, a home point or an
+--  altitude, which is exactly what a wrong AP_MODES entry did.
+--
+--  "WAIT" IS NOT HERE, for the reason spelled out at FM_BLOCKED: it reads like
+--  a warning and is not one, and amber would paint the pill from power-up to
+--  the first take-off. "LAND" and its ArduPilot spellings are not here either
+--  -- landing is usually commanded, so amber would cry wolf at the end of every
+--  normal flight, and INAV 7.x puts LAND in its DISARMED chain, which would
+--  paint a parked model amber. "RTL " needs no entry of its own: ArduPilot's
+--  pad byte is trimmed before the lookup.
+local MODE_ALERT = {
+  ["!ERR"] = true,                        -- INAV, Betaflight 4.3/4.4: arming refused
+  RTH  = true,                            -- Betaflight GPS Rescue, INAV return-to-home
+  WRTH = true,                            -- INAV, return-to-home from a waypoint run
+  RTL  = true, SRTL = true, QRTL = true,  -- ArduPilot: return, smart return, QuadPlane
+}
 
 -- ---------------------------------------------------------------------------
 --  MODEL NAME, straight from the radio.
@@ -1855,7 +2191,7 @@ local PROFILES = {
     okSlack = 2,
   },
   {
-    name = "480x320", w = 480, h = 320,   -- PL18/EV/U, ST16, T15, T15 Pro, T22, TX15
+    name = "480x320", w = 480, h = 320,   -- GX15, PL18/EV/U, ST16, T15/Pro, T22, TX15
     -- ===================================================================
     --  UNTESTED ON HARDWARE. Nobody has run GPSQR on one of these radios.
     -- ===================================================================
@@ -1983,10 +2319,12 @@ local function computeLayout(z)
   -- the extra room becomes comfortable padding around the pills, and it holds the
   -- card grid below at exactly the size it has always had. Font line heights vary
   -- a lot between radios, hence measuring rather than hard-coding.
-  -- Both pills share ONE width -- the pair reads as a unit, and the arm pill's
-  -- position must not shift when the GPS pill's text changes. That width is the
-  -- widest state string plus a symmetric margin, so it is the minimum that can
-  -- hold every state without clipping. Measured once (the layout is cached), not
+  -- The GPS and ARM pills share ONE width -- the pair reads as a unit, and the
+  -- arm pill's position must not shift when the GPS pill's text changes. That
+  -- width is the widest state string plus a symmetric margin, so it is the
+  -- minimum that can hold every state without clipping. The MODE pill gets its
+  -- own, narrower width just below, for the same reason applied to a different
+  -- set of strings. All of them are measured once (the layout is cached), never
   -- per frame.
   L.pillH = P.pillH
   local pw = 0
@@ -1995,6 +2333,13 @@ local function computeLayout(z)
     if w > pw then pw = w end
   end
   L.pillW = pw + 2 * P.pillPad
+  -- The MODE pill gets its OWN fixed width, narrower than the pair above because
+  -- it only ever holds four characters. Sized from MODE_REF, never from the
+  -- string currently showing: a pill that resized with its text would shove the
+  -- model name every time the mode changed, and the widest string is "FAILSAFE"-
+  -- class traffic, i.e. the moment the header must not redraw itself. Measured
+  -- once here, like everything else in this function.
+  L.modeW = textSize(MODE_REF, L.fPill) + 2 * P.pillPad
 
   -- L.fLabel, not a literal SMLSIZE: the header's height must be measured with
   -- the same font the labels below it are drawn in, and that is a PROFILE field.
@@ -2104,7 +2449,7 @@ end
 -- The layout depends on NOTHING but the zone geometry, and that only changes if
 -- the pilot edits the screen, so build it once and reuse it. It is ~15 tables
 -- and a couple of lcd.sizeText calls -- cheap once, but it used to run on every
--- one of the ~33 frames a second, all of it straight into the garbage collector.
+-- every frame -- ~11-13 a second, measured -- straight into the garbage collector.
 local function getLayout(z)
   local L = st.L
   if L and L.OX == z.x and L.OY == z.y and L.W == z.w and L.H == z.h then return L end
@@ -2183,12 +2528,15 @@ end
 
 -- Header, laid out as FOUR objects evenly spaced across the bar:
 --
---   [model name]     [GPS pill][ARM pill]     [timer]     [battery]
+--   [model name]   [GPS pill][ARM pill][MODE pill]   [timer]   [battery]
 --
--- The two pills count as ONE object: they keep a fixed gap so the pair reads as
--- a unit and the arm pill never drifts when the GPS text changes. Only the space
--- BETWEEN objects is distributed, and it is split equally. The name is pinned to
--- the left margin and the battery to the right, exactly where it has always sat.
+-- The pills count as ONE object: they keep a fixed gap so the group reads as a
+-- unit and no pill drifts when its neighbor's text changes -- which is why all
+-- three have a width fixed at layout time rather than one that follows the
+-- string. Only the space BETWEEN objects is distributed, and it is split equally.
+-- The name is pinned to the left margin and the battery to the right, exactly
+-- where they have always sat. The MODE pill is absent on a model with no FM
+-- sensor, and the name simply gets that room back.
 --
 -- The timer needs no label: mm:ss beside an arm-state pill is unambiguous, and
 -- dropping "FLIGHT TIME" is what buys the room for the model name.
@@ -2211,7 +2559,13 @@ local function drawHeader(L)
 
   -- ---- object widths
   local pillH, pillW = L.pillH, L.pillW
+  -- The MODE pill is present only when the model HAS an FM sensor, which is a
+  -- static property of the model -- so the header does not reflow in flight. It
+  -- is reserved here, before the name is measured, because the name is the one
+  -- elastic object and must be told the truth about how much room is left.
+  local showMode = (st.modeTxt ~= nil)
   local pillsW = pillW * 2 + gap
+  if showMode then pillsW = pillsW + gap + L.modeW end
   local tstr = fmtTime(st.flightSec)
   local timerW, tmh = textSize(tstr, L.fTimer)
   -- Reserve at least "00:00" so the spacing does not twitch as the digits change,
@@ -2266,6 +2620,43 @@ local function drawHeader(L)
   if st.armWarn then ac = C.amber
   else ac = st.armed and C.green or C.dim end
   pill(x + pillW + gap, pillY, pillW, pillH, ac, at, L.fPill)
+
+  -- THIRD PILL: the flight-mode string, straight off the FC.
+  --
+  -- The color says what the STRING says and nothing else. That is the division
+  -- of labor between this pill and the one before it: the ARM pill NORMALIZES
+  -- the arm state across three firmwares, this one does not translate at all. So
+  -- a Betaflight master model refusing to arm reads "BLOCKED | ACRO" -- its
+  -- refusal rides in the marker -- while INAV reads "BLOCKED | !ERR", its refusal
+  -- being in the name. Both are true, and the ARM pill is the one that reads the
+  -- same everywhere.
+  --
+  --    !FS!    red     the FC has declared failsafe
+  --    !ERR    amber   the FC refuses to arm, and prefixes '!' to say so
+  --    RTH/RTL amber   the model is flying itself home; you may not have asked
+  --    (other) blue    a fact, not a verdict
+  --    (other) gray    ...and the link is down, so that fact is last-known
+  --
+  -- BLUE, NOT GREEN, is the resting color on purpose. Green in this widget means
+  -- "a good thing is true" -- GPS LOCK, ARMED. A flight mode is neither good nor
+  -- bad, and the widget has no basis to say otherwise, so the pill sits OFF the
+  -- red/amber/green ladder while it is merely reporting. Stepping onto the ladder
+  -- is then itself the signal.
+  --
+  -- GRAY REPLACES BLUE ONLY. Every model-sourced reading on this screen grays
+  -- when the link drops, and a stale mode string should say so -- but graying a
+  -- red "!FS!" would hide the most important thing on the screen at the one
+  -- moment it matters. Blue is the only state with no severity to lose, so it is
+  -- the only one that gives way. (The two pills before this one never gray at
+  -- all: their color IS their meaning. That is deliberate, not an oversight.)
+  if showMode then
+    local mc
+    if st.modeTxt == "!FS!" then mc = C.red
+    elseif MODE_ALERT[st.modeTxt] then mc = C.amber
+    elseif st.stale then mc = C.dim
+    else mc = C.blue end
+    pill(x + 2 * (pillW + gap), pillY, L.modeW, pillH, mc, st.modeTxt, L.fPill)
+  end
   x = x + pillsW + g
 
   lcd.drawText(x, cy - floor(tmh / 2), tstr, L.fTimer + C.white)
@@ -2347,7 +2738,7 @@ local function drawStrip(L)
     { "LINK", st.lq   and string.format("%d", st.lq)   or "--", "%",   false },
     { "RSSI", st.rssi and string.format("%d", st.rssi) or "--", "dBm", true  },
     { L.P.lblTxPwr, st.pwr and string.format("%d", st.pwr) or "--", "mW", true },
-    { "MODE", st.mode and (RF_MODE[st.mode] or ("#" .. st.mode)) or "--", "", true },
+    { "RATE", st.rfMode and (RF_MODE[st.rfMode] or ("#" .. st.rfMode)) or "--", "", true },
     { L.P.lblRxBatt, st.rxbt and string.format("%.1f", st.rxbt) or "--", "V", true },
     { L.P.lblMah, fmtMah(st.mah), "", true },
     -- The radio's own clock. The only cell here that owes nothing to telemetry,
@@ -2528,8 +2919,8 @@ local function drawScreen(L)
 
   -- LAT/LON is a SENSOR READOUT: it shows the newest fix, every time one lands.
   -- It used to mirror the coordinates baked into the QR instead, so the two could
-  -- never disagree -- but that made a live sensor lag by up to CFG.QR_REFRESH
-  -- seconds for a reason that has nothing to do with it. The QR keeps its own
+  -- never disagree -- but that made a live sensor lag behind itself for a reason
+  -- that has nothing to do with it. The QR keeps its own
   -- refresh rate (re-encoding is expensive; see QR_SLICE), so between rebuilds
   -- the card can legitimately be ahead of the code beside it.
   --
@@ -2581,14 +2972,14 @@ end
 
 -- THERE ARE NO CONTROLS. Every setting worth having is a constant at the top of
 -- the file, and everything else the widget decides for itself: home is captured
--- at take-off, the flight resets on the next arm, the QR refreshes on its own
--- clock. The screen is an instrument, not a menu -- nothing here to press, and
--- nothing to press it by accident.
+-- at take-off, the flight resets on the next arm, the QR rebuilds itself when
+-- the model moves. The screen is an instrument, not a menu -- nothing here to
+-- press, and nothing to press it by accident.
 --
--- (Two buttons used to live under the coordinates: QR RATE and UNITS. The rate
--- is now fixed at 5 s, the only value that helps -- see CFG.QR_REFRESH -- and
--- UNITS is a preference you set once, so it moved to CFG. The row they occupied
--- went to the bottom strip, which is why it now runs the full screen width.)
+-- (Two buttons used to live under the coordinates: QR RATE and UNITS. There is
+-- no rate to set any more -- the code rebuilds on movement, see CFG.QR_MIN_MOVE
+-- -- and UNITS is a preference you set once, so it moved to CFG. The row they
+-- occupied went to the bottom strip, which is why it runs the full screen width.)
 
 -- ===========================================================================
 --  widget entry points  (EdgeTX color-radio widget: WIDGETS/GPSQR/main.lua)
@@ -2652,7 +3043,7 @@ local function refresh(wgt, event, touchState)
     drawTooSmall(z, st.L.badPanel)
     return
   end
-  updateQR(now)          -- continuous-mode refresh; only while the screen is visible
+  updateQR()             -- rebuilds on movement; only while the screen is visible
   drawScreen(st.L)
 end
 
