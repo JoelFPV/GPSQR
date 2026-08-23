@@ -1857,14 +1857,10 @@ local PROFILES = {
   {
     name = "480x320", w = 480, h = 320,   -- PL18/EV/U, ST16, T15, T15 Pro, T22, TX15
     -- ===================================================================
-    --  UNTESTED ON HARDWARE. Nobody has run GPSQR on one of these radios.
+    --  TESTED ON HARDWARE: RadioMaster TX15.
     -- ===================================================================
-    -- Same width as 480x272 and the SAME FONT CHOICES, deliberately: the fonts
-    -- are the one thing that cannot be known without the radio, so this profile
-    -- changes only what is safe to reason about -- how 48 extra pixels of HEIGHT
-    -- are spent. Everything font-dependent is copied from the panel that was
-    -- measured. If these radios turn out to use larger faces, the width check in
-    -- computeLayout refuses the screen rather than draw over itself.
+    -- Same width as 480x272, with its font choices adjusted from real TX15
+    -- screenshots and hardware testing to use the 48 extra pixels of height.
     --
     -- This started as the 480x272 profile letterboxed, and the extra height went
     -- wherever the arithmetic dropped it. Two things looked wrong, and both are
@@ -1877,25 +1873,24 @@ local PROFILES = {
     --   67 px tall, so the two share a bottom edge as well. At 44 it sat 4 px
     --   high, which reads as a mistake precisely because it is so nearly right.
     --
-    --   cardPadTop/Bot 13/11 keep the value tucked under its label. The value is
-    --   bottom-aligned in the card, so a taller row pushes it away from the
-    --   label: at 4/6 the gap opened from 7 px to 21. These restore the measured
-    --   7 px and center the pair, leaving 17 px above and 17 below.
+    --   cardPadTop/Bot 7/5 keep the larger value tucked under its label and
+    --   retain safe separation between their line boxes.
     --
     -- The ELRS strip's own padding is bumped for the same reason -- its value row
     -- is bottom-aligned too, and 7/8 holds the tested 10 px label-to-value gap in
     -- a 50 px strip.
     pad = 6,
-    fLabel = SMLSIZE, fVal = MIDSIZE, fPill = SMLSIZE, fTimer = F_STD,
-    fBatt  = F_STD,   fStripL = SMLSIZE, fStripV = SMLSIZE,  fCoL  = SMLSIZE,
-    fCo    = SMLSIZE, fName = MIDSIZE,
-    fPhBig = MIDSIZE, fPhSm = SMLSIZE,
+    fLabel = SMLSIZE, fVal = DBLSIZE, fPill = SMLSIZE, fTimer = F_STD,
+    fBatt  = F_STD,   fStripL = SMLSIZE, fStripV = F_STD,  fCoL  = SMLSIZE,
+    fStripVMin = SMLSIZE,
+    fCo    = F_BOLD, fName = MIDSIZE,
+    fPhBig = DBLSIZE, fPhSm = SMLSIZE,
     hdrGap = 4, hdrMin = 26, pillH = 20, pillPad = 8,
     battW = 26, battH = 13, battNub = 2, battGap = 6,
-    accentW = 4, cardPadX = 12, cardPadTop = 13, cardPadRight = 8, cardPadBot = 11,
+    accentW = 4, cardPadX = 12, cardPadTop = 7, cardPadRight = 8, cardPadBot = 5,
     stripH = 50, stripPadTop = 7, stripPadBot = 8,
     rcFrac = 0.30, qrFrac = 0.60, qrMargin = 0.07, coordPadX = 8,
-    phUp = 18, phDown = 7,
+    phUp = 24, phDown = 18,
     -- Same width, so the same labels have to fit the same card. Keeping them
     -- identical also keeps the two profiles comparable in profile_test.
     lblMaxDist = "MAX DIST TO HOME",
@@ -2361,8 +2356,6 @@ local function drawStrip(L)
   -- reads the same on a 44 px strip as on a 74 px one.
   local divInset = 8
   local lblY = y + L.P.stripPadTop
-  local _, vh = textSize("0", L.fStripV)
-  local valY = y + h - L.P.stripPadBot - vh
   for i = 1, n do
     local cx = x + (i - 1) * cw
     if i > 1 then
@@ -2371,6 +2364,12 @@ local function drawStrip(L)
     lcd.drawText(cx + floor(cw / 2), lblY, items[i][1], L.fStripL + C.label + CENTER)
     local vtxt = items[i][2]
     if items[i][3] ~= "" and vtxt ~= "--" then vtxt = vtxt .. items[i][3] end
+    local vf = L.fStripV
+    if L.P.fStripVMin and textSize(vtxt, vf) > floor(cw) - 4 then
+      vf = L.P.fStripVMin
+    end
+    local _, vh = textSize("0", vf)
+    local valY = y + h - L.P.stripPadBot - vh
     -- A "--" grays along with everything else. It used to be left white on the
     -- reasoning that gray means "a held value that is no longer live", and a dash
     -- holds nothing -- but the stat cards gray their dashes, so the two halves of
@@ -2378,7 +2377,7 @@ local function drawStrip(L)
     -- One rule instead: while the link is down, everything that depends on it is
     -- gray. LINK is unaffected -- its stale flag is false, because 0% IS live.
     local vc = (st.stale and items[i][4]) and C.stale or C.text
-    lcd.drawText(cx + floor(cw / 2), valY, vtxt, L.fStripV + vc + CENTER)
+    lcd.drawText(cx + floor(cw / 2), valY, vtxt, vf + vc + CENTER)
   end
 end
 

@@ -53,11 +53,11 @@ Lost a quad in a field? Point your phone at the radio. GPSQR keeps a live, scann
 |---|---|---|
 | **800×480** | ✅ **tested** | RadioMaster TX16S **MK3** — the only EdgeTX radio with this panel |
 | **480×272** | ✅ **tested** | **TX16S MK1/MK2**, X10, X10 Express, X12S, T16, T18, F16, V16, C14 |
-| **480×320** | ⚠️ **untested** | PL18 / PL18EV / PL18U, ST16, T15, T15 Pro, T22, TX15 |
+| **480×320** | ✅ **tested** | **Tested on TX15** — PL18 / PL18EV / PL18U, ST16, T15, T15 Pro, T22, TX15 |
 | 320×480 (portrait) | ❌ not supported | NV14, EL18, NB4P |
 | 320×240 | ❌ not supported | PA01 |
 
-**480×320 is accepted but has never been run on hardware.** It has its own layout and deliberately reuses 480×272's fonts, which are the one thing that cannot be known without the radio. If you own one of these, a report either way would be genuinely useful.
+**480×320 is hardware-tested on RadioMaster TX15.** It has its own font choices, calibrated from real TX15 screenshots: larger main values, QR placeholder, coordinates, and ordinary strip values. Unusually wide strip values still fall back one size so they cannot run into adjacent cells.
 
 ---
 
