@@ -16,12 +16,13 @@ Lost a quad in a field? Point your phone at the radio. GPSQR keeps a live, scann
 
 **On screen**
 
-- 🛰️ **A QR code that walks you to your model** — scan it with any phone, Google Maps opens at the model's last reported position. It **stays on screen when telemetry dies**, so a crash still leaves you a code to follow.
+- 🛰️ **A QR code that walks you to your model** — scan it with any phone, Google Maps opens at the model's last reported position. It re-encodes as soon as the model moves, and **stays on screen when telemetry dies**, so a crash still leaves you a code to follow.
 - 📍 **Distance to home** and **trip flown** — home is captured automatically at take-off, GPS jitter filtered out of the trip.
-- ⛰️ **Height above take-off** — with absolute **MSL** alongside on Betaflight. iNAV does not report sea level at all, so that figure is correctly left out.
+- ⛰️ **Height above take-off** — with absolute **MSL** alongside on Betaflight and ArduPilot. iNAV does not report sea level at all, so that figure is correctly left out.
 - 💨 **Ground speed** and **heading** — heading is computed from the GPS track, so it is correct whatever units your flight controller reports.
 - 🛰️ **Satellite count**, color-coded by fix quality.
 - ⏱️ **Flight time**, running from the moment you arm until you disarm.
+- ✈️ **The flight mode your FC is in**, in its own words — and it turns amber when the model is bringing itself home, red in failsafe.
 - 🔋 **Radio battery**, **model battery**, and **milliamp-hours drawn** if your FC has a current sensor.
 - 📶 **Full ELRS panel** — link quality, RSSI, TX power, packet rate.
 - 📌 **Coordinates**, at the radio's true resolution (~11 cm).
@@ -39,7 +40,7 @@ Lost a quad in a field? Point your phone at the radio. GPSQR keeps a live, scann
 - **EdgeTX color radios** with an **800×480**, **480×272** or **480×320** screen. [Check yours below](#supported-radios).
 - **EdgeTX 2.8 or newer.**
 - **CRSF / ELRS** telemetry. Most of the screen degrades gracefully without ELRS.
-- **Betaflight and iNAV**, detected automatically.
+- **Betaflight, iNAV and ArduPilot**, detected automatically from the flight-mode string, which is also shown on screen. On ArduPilot, turn on **RC_OPTIONS bit 12** ("Annotate flight mode with * on disarm") so the widget can read arm state from the model — see Troubleshooting.
 - **Metric or imperial** — one constant you can change yourself at the top of the Lua script.
 - A **GPS-equipped model** for the GPS features. Without one, everything else still works and the GPS cards honestly read `--`.
 
@@ -53,7 +54,7 @@ Lost a quad in a field? Point your phone at the radio. GPSQR keeps a live, scann
 |---|---|---|
 | **800×480** | ✅ **tested** | RadioMaster TX16S **MK3** — the only EdgeTX radio with this panel |
 | **480×272** | ✅ **tested** | **TX16S MK1/MK2**, X10, X10 Express, X12S, T16, T18, F16, V16, C14 |
-| **480×320** | ⚠️ **untested** | PL18 / PL18EV / PL18U, ST16, T15, T15 Pro, T22, TX15 |
+| **480×320** | ⚠️ **untested** | GX15, PL18 / PL18EV / PL18U, ST16, T15, T15 Pro, T22, TX15 |
 | 320×480 (portrait) | ❌ not supported | NV14, EL18, NB4P |
 | 320×240 | ❌ not supported | PA01 |
 
@@ -124,6 +125,23 @@ Read from the flight controller itself. Amber always means **"don't take off yet
 - **`BLOCKED` is the model talking** — the FC reports arming disabled. Usually throttle not at idle, model not level, calibration pending, or an arming switch already on. It clears the moment the FC is happy. Only ever shown on the ground.
 - **If telemetry is lost the pill holds its last state** rather than claiming `DISARMED`. A lost link means *unknown*, and the model may well still be flying.
 
+### The mode pill
+
+The third pill is the flight controller's own flight-mode string, shown **exactly as the FC sends it** — no translation, no renaming. Only the arming marker is taken off, because the arm pill has already used it. It appears on any model that has an `FM` sensor, whatever the firmware.
+
+| Pill | Meaning |
+|---|---|
+| **`!FS!`** red | the FC has declared **failsafe** |
+| **`!ERR`** amber | the FC **refuses to arm** (iNAV and Betaflight 4.3/4.4 say this in the mode string; Betaflight 5.x says it with the marker instead, so there you see `BLOCKED` beside a normal mode) |
+| **`RTH` `RTL` `SRTL` `QRTL` `WRTH`** amber | **the model is flying itself home** — you may not have asked it to |
+| anything else, blue | the mode you selected. `ACRO`, `ANGL`, `AUTO`, `LOIT`, `QHOV`, `CRUZ`… |
+| anything else, gray | the same, but the link is down, so it is the last mode you saw |
+
+- **Blue is not a judgment.** Green on this screen means *a good thing is true* — `GPS LOCK`, `ARMED`. A flight mode is neither good nor bad, so the mode pill sits off that scale while it is only reporting. When it does turn amber or red, that is the signal.
+- **`WAIT` is blue, not amber.** Betaflight sends it when there is no fix *or* no home point yet, and the home point is only set when you arm — so it is normal on the ground and clears on its own. Your GPS pill is the honest answer to "can I fly yet".
+- **On a dropout only blue turns gray.** Amber and red keep their color: if the last thing the model said was `!FS!`, hiding it is the last thing you want.
+- **ArduPilot gets the most out of this pill**, because its 50-odd modes are otherwise invisible from the radio.
+
 ### What each card shows, and when
 
 Nothing is displayed until it means something:
@@ -164,12 +182,13 @@ MSL is live from `GPS LOCK` onwards, on the ground included, so you can read you
 | | On telemetry loss |
 |---|---|
 | distance, altitude, speed, heading, satellites, trip, `LAT`/`LON` | **grayed** — frozen at the last reading |
-| `RSSI`, `TX POWER`, `MODE`, `RX BATTERY` | **grayed** — they only ever arrive inside the telemetry frame |
+| `RSSI`, `TX POWER`, `RATE`, `RX BATTERY` | **grayed** — they only ever arrive inside the telemetry frame |
 | **QR code** | unchanged — still encodes that last position, which is what you walk to |
 | `LINK` | **stays white** — `0%` is itself the live answer, a true reading of a dead link |
 | flight timer | **keeps running** — it depends only on arm state |
 | radio battery, clock | **unaffected** — neither comes from the model |
 | arm pill | **holds** — a lost link means unknown |
+| mode pill | **holds**, and grays — unless it is amber or red, which keep their color |
 | `MAX …` cards | **stay white** — a finished flight's record is history, not a stale reading |
 
 Staleness is judged from the link statistics alone. If your setup has no link sensors, nothing is ever grayed: the widget will not claim staleness it cannot detect.
@@ -192,8 +211,9 @@ The ones worth knowing about:
 | `SPEED_TO_KMH` | `1.0` | scale the speed sensor. FrSky GPS often reports **knots** → `1.852` |
 | `ALT_TO_M` | `1.0` | scale the altitude sensor (a feet sensor → `0.3048`) |
 | `TRIP_MIN_STEP` | `3.0` | meters; movement smaller than this is GPS jitter, not travel |
+| `QR_MIN_MOVE` | `3.0` | meters the model must move before the QR is re-encoded — the same jitter floor, so a parked model never rebuilds |
 
-The remaining constants encode a **measurement** rather than a preference — `QR_REFRESH`, `ALT_JUMP_M`, `TRIP_MAX_STEP`, `QR_SLICE`, the QR precision. The comments beside them say what was measured; don't retune them without redoing it.
+The remaining constants encode a **measurement** rather than a preference — `ALT_JUMP_M`, `TRIP_MAX_STEP`, `QR_SLICE`, the QR precision. The comments beside them say what was measured; don't retune them without redoing it.
 
 Sensors are looked up by name — `Sats`, `GAlt`, `Alt`, `GSpd`, `GPS`, `Capa`, `FM`, and the ELRS set (`1RSS`, `2RSS`, `RQly`, `TPWR`, `RFMD`, `RxBt`). If your telemetry uses different names, edit the `*_SENSORS` lists near the top of the file; each is tried in order and the first that exists is used.
 
@@ -207,9 +227,10 @@ Sensors are looked up by name — `Sats`, `GAlt`, `Alt`, `GSpd`, `GPS`, `Capa`, 
 - **No MSL figure** — the altitude sensor is missing: `GAlt` on EdgeTX 2.12+, or `Alt` on 2.8–2.11. Same measurement, different name. It rides the same frame as `GPS`, `GSpd`, `Hdg` and `Sats`, so if you have those four the data is already arriving; re-discover with a fix acquired. On iNAV there is correctly no MSL at all.
 - **Trip creeps up while the model sits still** — raise `TRIP_MIN_STEP`. It has to exceed your receiver's worst jitter. Parked for 60 s with ±2 m of wander, a 2 m floor invents **641 m** of trip while a 3 m floor reads **0 m**. Raising it costs nothing in accuracy, so err high.
 - **ELRS cells read `--`** — those sensor names aren't present. Normal on non-ELRS setups, and it doesn't affect the GPS features.
-- **`TX POWER` and `MODE` read `--` with the model switched off** — the radio has genuinely never been told them. Both ride in the CRSF link-statistics frame, and EdgeTX drops the later sub-fields when link quality is zero. It fixes itself the moment the model is powered up.
+- **`TX POWER` and `RATE` read `--` with the model switched off** — the radio has genuinely never been told them. Both ride in the CRSF link-statistics frame, and EdgeTX drops the later sub-fields when link quality is zero. It fixes itself the moment the model is powered up.
 - **Home never locks** — home is set when the model **arms**, and needs `GPS LOCK` at that moment. Without it the capture waits for the first locked frame.
-- **`MODE` shows `#<number>`** — an ELRS packet rate not in the lookup table. Open an issue with the value and the real rate and it can be added.
+- **`RATE` shows `#<number>`** — an ELRS packet rate not in the lookup table. Open an issue with the value and the real rate and it can be added.
+- **On ArduPilot the arm pill never leaves `DISARMED`, or only changes once you fly** — ArduPilot does not put arm state in its flight-mode string unless you ask it to. In Mission Planner set **RC_OPTIONS bit 12**, *"Annotate flight mode with * on disarm"*. Without it the widget will not guess: it falls back to a radio switch (`ARM_MODE`) or to motion, because home, the trip and the timer all key off the arm moment and inventing one is worse than admitting there is no source.
 
 ---
 
@@ -217,9 +238,11 @@ Sensors are looked up by name — `Sats`, `GAlt`, `Alt`, `GSpd`, `GPS`, `Capa`, 
 
 GPSQR is a project by **Joël Conus** — the design, the requirements, and the field work behind them. Every behavior here was specified against real flying: each iteration was flown, the radio screenshots that the layout, font metrics and telemetry handling are calibrated against came off the author's own two radios, and every design rule at the top of `main.lua` was paid for by something going wrong in a field.
 
-The **code** was written by **Claude** ([Anthropic](https://www.anthropic.com)) — every line of the widget, and this documentation.
+The **code** was written by **Claude** ([Anthropic](https://www.anthropic.com)) — the widget and this documentation.
 
-Where the firmware's behavior mattered, it was read rather than guessed: the widget's own comments cite the EdgeTX, Betaflight and iNAV source each rule was derived from.
+Where the firmware's behavior mattered, it was read rather than guessed: the widget's own comments cite the EdgeTX, Betaflight, iNAV and ArduPilot source each rule was derived from.
+
+ArduPilot support was contributed by **Keith Luneau**.
 
 ## License
 
@@ -229,11 +252,11 @@ MIT — see [LICENSE](LICENSE).
 
 ## Tags
 
-**Radios** — RadioMaster TX16S, TX16S MK2, TX16S MK3, Jumper T16, T18, T15, T22, TX15, FrSky X10, X10 Express, X12S, Horus, Flysky PL18, PL18EV, PL18U, ST16, F16, V16, C14 · 800×480, 480×272, 480×320 color LCD
+**Radios** — RadioMaster TX16S, GX15, TX16S MK2, TX16S MK3, Jumper T16, T18, T15, T22, TX15, FrSky X10, X10 Express, X12S, Horus, Flysky PL18, PL18EV, PL18U, ST16, F16, V16, C14 · 800×480, 480×272, 480×320 color LCD
 
-**Firmware & link** — EdgeTX, EdgeTX widget, color-radio widget, Lua widget, Lua 5.3, CRSF, ELRS, ExpressLRS, Betaflight, iNAV, flight controller telemetry
+**Firmware & link** — EdgeTX, EdgeTX widget, color-radio widget, Lua widget, Lua 5.3, CRSF, ELRS, ExpressLRS, Betaflight, iNAV, ArduPilot, ArduCopter, ArduPlane, flight controller telemetry
 
-**What it does** — GPS telemetry, QR code, Google Maps QR, lost model locator, lost drone finder, find my drone, distance to home, trip distance, altitude MSL, ground speed, course over ground, satellite count, flight timer, mAh consumed, link quality, RSSI, TX power, packet rate, full-screen telemetry screen
+**What it does** — GPS telemetry, QR code, Google Maps QR, lost model locator, lost drone finder, find my drone, distance to home, trip distance, altitude MSL, ground speed, course over ground, satellite count, flight timer, mAh consumed, flight mode display, link quality, RSSI, TX power, packet rate, full-screen telemetry screen
 
 **Aircraft** — FPV, drone, quadcopter, quad, multirotor, RC plane, fixed wing, model aircraft, long range
 
