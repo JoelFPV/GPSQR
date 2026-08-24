@@ -1,5 +1,5 @@
 -- ============================================================================
---  GPSQR 1.2.0 - full-screen GPS / ELRS telemetry widget for EdgeTX color radios
+--  GPSQR 1.2.1 - full-screen GPS / ELRS telemetry widget for EdgeTX color radios
 --
 --  Shows satellites, live coordinates, a scannable Google-Maps QR code, height
 --  above take-off (plus MSL), speed, course, distance to home, trip, flight
@@ -12,10 +12,11 @@
 --  SCREENS: exactly three panels are accepted, each with its own entry in
 --  PROFILES. 800x480 (RadioMaster TX16S MK3, the only EdgeTX board with that
 --  panel) and 480x272 (TX16S MK1/MK2, X10, X12S, T16, T18, ...) are both
---  measured and flight-tested; 480x320 (GX15, PL18, ST16, T15, T22, TX15) has its
---  profile but has never run on hardware. Any other panel is REFUSED with an
---  on-screen notice rather than approximated -- handing a 320x240 radio a layout
---  measured for a bigger one just draws a third of it off the edge.
+--  measured and flight-tested; 480x320 (GX15, PL18, ST16, T15, T22, TX15) was
+--  measured on a TX15 and is untested on the other five. Any other panel is
+--  REFUSED with an on-screen notice rather than approximated -- handing a
+--  320x240 radio a layout measured for a bigger one just draws a third of it
+--  off the edge.
 --  A supported panel whose ZONE is too small to lay out legibly gets the setup
 --  checklist instead of a squashed instrument -- see the L.ok check in
 --  computeLayout.
@@ -82,7 +83,7 @@
 -- something that is. It is a local rather than a comment so it survives a tool
 -- that strips comments, and it is recorded here so the next dead-code audit
 -- leaves it alone.
-local VERSION = "1.2.0"
+local VERSION = "1.2.1"
 
 -- ---------------------------------------------------------------------------
 --  USER CONFIGURATION
@@ -2193,14 +2194,19 @@ local PROFILES = {
   {
     name = "480x320", w = 480, h = 320,   -- GX15, PL18/EV/U, ST16, T15/Pro, T22, TX15
     -- ===================================================================
-    --  UNTESTED ON HARDWARE. Nobody has run GPSQR on one of these radios.
+    --  MEASURED ON A RadioMaster TX15 (EdgeTX 2.12.2, PR #2). The other five
+    --  radios in this class -- GX15, PL18/EV/U, ST16, T15/Pro, T22 -- are still
+    --  untested, and the clearances at the foot of this note are what they are
+    --  relying on.
     -- ===================================================================
-    -- Same width as 480x272 and the SAME FONT CHOICES, deliberately: the fonts
-    -- are the one thing that cannot be known without the radio, so this profile
-    -- changes only what is safe to reason about -- how 48 extra pixels of HEIGHT
-    -- are spent. Everything font-dependent is copied from the panel that was
-    -- measured. If these radios turn out to use larger faces, the width check in
-    -- computeLayout refuses the screen rather than draw over itself.
+    -- This profile used to copy 480x272's FONTS outright, on the reasoning that
+    -- a face is the one thing that cannot be known without the radio. The TX15
+    -- screenshots settled it: the ladder IS the MK2's. Seven strip labels
+    -- measured off real TX15 ink match the harness's width model at cap 9 to a
+    -- mean 1.56 px -- the same accuracy that model reaches against the MK2 it was
+    -- fitted to. So `font_model.ALIAS (480,320) -> (480,272)` is confirmed rather
+    -- than assumed, and THAT is what licenses the larger faces below. They were
+    -- picked against measured ink (Tests/audit_320.py), not by eye.
     --
     -- This started as the 480x272 profile letterboxed, and the extra height went
     -- wherever the arithmetic dropped it. Two things looked wrong, and both are
@@ -2213,37 +2219,51 @@ local PROFILES = {
     --   67 px tall, so the two share a bottom edge as well. At 44 it sat 4 px
     --   high, which reads as a mistake precisely because it is so nearly right.
     --
-    --   cardPadTop/Bot 13/11 keep the value tucked under its label. The value is
-    --   bottom-aligned in the card, so a taller row pushes it away from the
-    --   label: at 4/6 the gap opened from 7 px to 21. These restore the measured
-    --   7 px and center the pair, leaving 17 px above and 17 below.
+    --   cardPadTop/Bot 7/5 keep the value tucked under its label. The value is
+    --   bottom-aligned in the card, so the padding has to answer to the VALUE's
+    --   height: 13/11 was fitted around a MIDSIZE value, and left as-is under a
+    --   DBLSIZE one it pushed the pair apart again. 7/5 restores the tucked-in
+    --   look the TX15 screenshots show.
     --
-    -- The ELRS strip's own padding is bumped for the same reason -- its value row
-    -- is bottom-aligned too, and 7/8 holds the tested 10 px label-to-value gap in
-    -- a 50 px strip.
+    -- The ELRS strip's own padding is unchanged -- its value row is still
+    -- SMLSIZE, so 7/8 still holds the tested 10 px label-to-value gap in a 50 px
+    -- strip. That row stays small ON PURPOSE while everything around it grew:
+    -- the cell is 66.9 px and STDSIZE does not fit what it actually holds.
+    -- "250mAh" is already 62.3 px, so USED would drop a size within the first
+    -- minute of a flight, and TX POWER would change size whenever ELRS dynamic
+    -- power crossed 1000 mW -- a row that resizes itself under the pilot, at the
+    -- moments the pilot is reading it. One size that always fits beats a bigger
+    -- one that sometimes does. 800x480 can afford F_STD there because its cell
+    -- is 111 px, not 67.
+    --
+    -- WHAT IS TIGHT, because a future change has to know where the walls are.
+    -- From audit_320.py, which drives the widest string each cell can ever hold:
+    --   "123 km/h"  DBLSIZE  134.6 px of a 138 px card       3.4 px clear
+    --   "NO LOCK"   DBLSIZE  131.6 px of the 140 px QR card  4.2 px each side
+    -- Both sit just outside the width model's own +-3 px band, and they are the
+    -- first two things to break if an untested radio here draws wider.
     pad = 6,
-    fLabel = SMLSIZE, fVal = MIDSIZE, fPill = SMLSIZE, fTimer = F_STD,
+    fLabel = SMLSIZE, fVal = DBLSIZE, fPill = SMLSIZE, fTimer = F_STD,
     fBatt  = F_STD,   fStripL = SMLSIZE, fStripV = SMLSIZE,  fCoL  = SMLSIZE,
-    fCo    = SMLSIZE, fName = MIDSIZE,
-    fPhBig = MIDSIZE, fPhSm = SMLSIZE,
+    fCo    = F_BOLD,  fName = MIDSIZE,
+    fPhBig = DBLSIZE, fPhSm = SMLSIZE,
     hdrGap = 4, hdrMin = 26, pillH = 20, pillPad = 8,
     battW = 26, battH = 13, battNub = 2, battGap = 6,
-    accentW = 4, cardPadX = 12, cardPadTop = 13, cardPadRight = 8, cardPadBot = 11,
+    accentW = 4, cardPadX = 12, cardPadTop = 7, cardPadRight = 8, cardPadBot = 5,
     stripH = 50, stripPadTop = 7, stripPadBot = 8,
     rcFrac = 0.30, qrFrac = 0.60, qrMargin = 0.07, coordPadX = 8,
-    phUp = 18, phDown = 7,
+    phUp = 24, phDown = 18,
     -- Same width, so the same labels have to fit the same card. Keeping them
     -- identical also keeps the two profiles comparable in profile_test.
     lblMaxDist = "MAX DIST TO HOME",
     lblMaxAlt  = "MAX ALT",
     lblTxPwr   = "TX POWER",
     lblRxBatt  = "RX BATT",
-    -- Same 66.9 px strip cell as 480x272, so the same arithmetic applies: see the
-    -- note there. On an UNTESTED panel the short forms are doubly right -- if these
-    -- radios use larger faces, every figure there is optimistic. "TX POWER" is the
-    -- one spelled out, on 5 px of clearance; it is therefore the FIRST label to
-    -- shorten if one of these radios turns out to draw wider than the measured
-    -- panel.
+    -- Same 66.9 px strip cell as 480x272, drawn at the same size, so the same
+    -- arithmetic applies: see the note there. "TX POWER" is the one label spelled
+    -- out, on 5 px of clearance; it is still the FIRST label to shorten if one of
+    -- the five untested radios in this class turns out to draw wider than the
+    -- TX15 did.
     lblMah     = "USED",
     mslSep     = "",
     okSlack = 2,
