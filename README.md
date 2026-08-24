@@ -54,11 +54,9 @@ Lost a quad in a field? Point your phone at the radio. GPSQR keeps a live, scann
 |---|---|---|
 | **800×480** | ✅ **tested** | RadioMaster TX16S **MK3** — the only EdgeTX radio with this panel |
 | **480×272** | ✅ **tested** | **TX16S MK1/MK2**, X10, X10 Express, X12S, T16, T18, F16, V16, C14 |
-| **480×320** | ⚠️ **untested** | GX15, PL18 / PL18EV / PL18U, ST16, T15, T15 Pro, T22, TX15 |
+| **480×320** | ✅ **tested** | **TX15**, GX15, PL18 / PL18EV / PL18U, ST16, T15, T15 Pro, T22 |
 | 320×480 (portrait) | ❌ not supported | NV14, EL18, NB4P |
 | 320×240 | ❌ not supported | PA01 |
-
-**480×320 is accepted but has never been run on hardware.** It has its own layout and deliberately reuses 480×272's fonts, which are the one thing that cannot be known without the radio. If you own one of these, a report either way would be genuinely useful.
 
 ---
 
@@ -213,7 +211,7 @@ The ones worth knowing about:
 | `TRIP_MIN_STEP` | `3.0` | meters; movement smaller than this is GPS jitter, not travel |
 | `QR_MIN_MOVE` | `3.0` | meters the model must move before the QR is re-encoded — the same jitter floor, so a parked model never rebuilds |
 
-The remaining constants encode a **measurement** rather than a preference — `ALT_JUMP_M`, `TRIP_MAX_STEP`, `QR_SLICE`, the QR precision. The comments beside them say what was measured; don't retune them without redoing it.
+The remaining constants encode a **measurement** rather than a preference — `ALT_JUMP_M`, `TRIP_MAX_STEP` and `QR_PREC` in `CFG`, plus `QR_SLICE`, which lives beside the QR builder further down rather than in `CFG`. The comments beside them say what was measured; don't retune them without redoing it.
 
 Sensors are looked up by name — `Sats`, `GAlt`, `Alt`, `GSpd`, `GPS`, `Capa`, `FM`, and the ELRS set (`1RSS`, `2RSS`, `RQly`, `TPWR`, `RFMD`, `RxBt`). If your telemetry uses different names, edit the `*_SENSORS` lists near the top of the file; each is tried in order and the first that exists is used.
 
@@ -236,13 +234,15 @@ Sensors are looked up by name — `Sats`, `GAlt`, `Alt`, `GSpd`, `GPS`, `Capa`, 
 
 ## Credits
 
-GPSQR is a project by **Joël Conus** — the design, the requirements, and the field work behind them. Every behavior here was specified against real flying: each iteration was flown, the radio screenshots that the layout, font metrics and telemetry handling are calibrated against came off the author's own two radios, and every design rule at the top of `main.lua` was paid for by something going wrong in a field.
+GPSQR is a project by **Joël Conus** — the design, the requirements, and the field work behind them. Every behavior here was specified against real flying: each iteration was flown, the radio screenshots that the layout, font metrics and telemetry handling are calibrated against came off the author's own radios, and every design rule at the top of `main.lua` was paid for by something going wrong in a field.
 
 The **code** was written by **Claude** ([Anthropic](https://www.anthropic.com)) — the widget and this documentation.
 
 Where the firmware's behavior mattered, it was read rather than guessed: the widget's own comments cite the EdgeTX, Betaflight, iNAV and ArduPilot source each rule was derived from.
 
-ArduPilot support was contributed by **Keith Luneau**.
+ArduPilot support was contributed by **Keith Luneau** ([@keithluneau](https://github.com/keithluneau)).
+
+The 480×320 layout was measured on real TX15 hardware by **[@pdejan](https://github.com/pdejan)**, which is what turned that panel from a reasoned guess into a tested one.
 
 ## License
 
