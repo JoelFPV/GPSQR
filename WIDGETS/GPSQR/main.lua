@@ -1,5 +1,5 @@
 -- ============================================================================
---  GPSQR 1.2.1 - full-screen GPS / ELRS telemetry widget for EdgeTX color radios
+--  GPSQR 1.2.2 - full-screen GPS / ELRS telemetry widget for EdgeTX color radios
 --
 --  Shows satellites, live coordinates, a scannable Google-Maps QR code, height
 --  above take-off (plus MSL), speed, course, distance to home, trip, flight
@@ -9,13 +9,14 @@
 --  that same mode string -- see AP_MODES for the one ArduPilot setting worth
 --  changing (RC_OPTIONS bit 12, CRSF_FM_DISARM_STAR).
 --
---  SCREENS: exactly three panels are accepted, each with its own entry in
+--  SCREENS: exactly four panels are accepted, each with its own entry in
 --  PROFILES. 800x480 (RadioMaster TX16S MK3, the only EdgeTX board with that
 --  panel) and 480x272 (TX16S MK1/MK2, X10, X12S, T16, T18, ...) are both
 --  measured and flight-tested; 480x320 (GX15, PL18, ST16, T15, T22, TX15) was
---  measured on a TX15 and is untested on the other five. Any other panel is
---  REFUSED with an on-screen notice rather than approximated -- handing a
---  320x240 radio a layout measured for a bigger one just draws a third of it
+--  measured on a TX15 and is untested on the other five; 320x240 (Flysky PA01,
+--  HelloRadioSky V12) has never run on hardware. Any other panel is REFUSED
+--  with an on-screen notice rather than approximated -- handing a 320x480
+--  portrait radio a layout measured for a 480-wide one just draws a third of it
 --  off the edge.
 --  A supported panel whose ZONE is too small to lay out legibly gets the setup
 --  checklist instead of a squashed instrument -- see the L.ok check in
@@ -83,7 +84,7 @@
 -- something that is. It is a local rather than a comment so it survives a tool
 -- that strips comments, and it is recorded here so the next dead-code audit
 -- leaves it alone.
-local VERSION = "1.2.1"
+local VERSION = "1.2.2"
 
 -- ---------------------------------------------------------------------------
 --  USER CONFIGURATION
@@ -2066,8 +2067,9 @@ end
 --  A panel that is not listed here -- exactly, or in a profile's `also` list --
 --  is REJECTED, and the widget prints the unsupported-screen notice instead of
 --  drawing. This used to fall back to the nearest profile by size, which is
---  wrong for a screen that is nothing like either of them: a 320x240 PA01 would
---  have been handed the 480x272 layout and drawn a third of it off the edge.
+--  wrong for a screen that is nothing like either of them: a 320x240 PA01,
+--  before it had a profile of its own, would have been handed the 480x272
+--  layout and drawn a third of it off the edge.
 --  Refusing is honest; guessing is not.
 --
 --  The FONT CONSTANTS are per-profile too, because EdgeTX scales its fonts to
@@ -2111,8 +2113,11 @@ local PROFILES = {
     rcFrac = 0.30, qrFrac = 0.60, qrMargin = 0.07, coordPadX = 10,
     -- QR placeholder text, offsets from the card's center line
     phUp = 30, phDown = 14,
-    -- Labels that have to shrink on a narrower panel. Only the ones that differ
-    -- are listed; everything else reads the same on every screen.
+    -- Labels a narrower panel may have to shorten. EVERY profile names all of
+    -- them, so the drawing code reads L.P and never falls back to a literal;
+    -- any label not listed here reads the same on every screen.
+    lblDist    = "DISTANCE TO HOME",
+    lblAlt     = "ALTITUDE",
     lblMaxDist = "MAX DISTANCE TO HOME",
     lblMaxAlt  = "MAX ALTITUDE",
     lblTxPwr   = "TX POWER",
@@ -2121,6 +2126,11 @@ local PROFILES = {
     mslSep     = " ",     -- between the MSL figure and its unit: "2427 m MSL"
     -- slack demanded by the "is this legible?" test in computeLayout
     okSlack = 4,
+    -- refresh()'s cheap reject: a zone below this never gets a layout built at
+    -- all, it goes straight to the setup checklist. Per profile because "tiny"
+    -- depends on the panel -- this used to be a literal 380 x 200 in refresh(),
+    -- which turned every 320-wide radio away before computeLayout was asked.
+    minZoneW = 380, minZoneH = 200,
   },
   {
     name = "480x272", w = 480, h = 272,   -- TX16S MK1/MK2, X10, T16, T18, X12S...
@@ -2164,6 +2174,8 @@ local PROFILES = {
     -- Re-centered for the MIDSIZE placeholder: its line box is 8 px shorter than
     -- DBLSIZE's, so the pair would otherwise sit high in the card.
     phUp = 18, phDown = 7,
+    lblDist    = "DISTANCE TO HOME",
+    lblAlt     = "ALTITUDE",
     -- Shortened for this panel -- measured against a TX16S MK2. At full length
     -- "MAX DISTANCE TO HOME" needs 151 px of the card's 138. Closing the space in
     -- the MSL note buys the 2 px that "32805 ft MSL" was over by in imperial.
@@ -2190,6 +2202,7 @@ local PROFILES = {
     lblMah     = "USED",
     mslSep     = "",
     okSlack = 2,
+    minZoneW = 380, minZoneH = 200,
   },
   {
     name = "480x320", w = 480, h = 320,   -- GX15, PL18/EV/U, ST16, T15/Pro, T22, TX15
@@ -2255,6 +2268,8 @@ local PROFILES = {
     phUp = 24, phDown = 18,
     -- Same width, so the same labels have to fit the same card. Keeping them
     -- identical also keeps the two profiles comparable in profile_test.
+    lblDist    = "DISTANCE TO HOME",
+    lblAlt     = "ALTITUDE",
     lblMaxDist = "MAX DIST TO HOME",
     lblMaxAlt  = "MAX ALT",
     lblTxPwr   = "TX POWER",
@@ -2267,6 +2282,82 @@ local PROFILES = {
     lblMah     = "USED",
     mslSep     = "",
     okSlack = 2,
+    minZoneW = 380, minZoneH = 200,
+  },
+  {
+    name = "320x240", w = 320, h = 240,   -- Flysky PA01, HelloRadioSky V12 (incl. CNC Max)
+    -- ===================================================================
+    --  UNTESTED ON HARDWARE. Nobody has run GPSQR on one of these radios.
+    -- ===================================================================
+    -- The one panel whose FONTS are known exactly without the radio. EdgeTX
+    -- builds three font sets (radio/src/fonts/CMakeLists.txt): lrg for 800x480,
+    -- std for every 480-wide panel, and sml for 320x240 alone. Tests/
+    -- edgetx_font.py decodes those LVGL sources directly -- the same decoder
+    -- reproduces ink measured on a real MK2 to a mean 0.76 px -- so every width
+    -- below is the radio's own glyph advance, not a model fitted to a photo.
+    --
+    -- What is NOT known is the glass. Both radios have a 2.4" panel, half the
+    -- width of a TX16S, so a pixel is 0.152 mm: values here are 1.98 mm tall
+    -- against ~3.3 mm on a TX16S, and the QR at 3 px a module is 0.46 mm a module
+    -- against the 0.59 mm MK2 owners scan. Whether it scans off this panel is the
+    -- open question. The layout was chosen to keep EVERYTHING the bigger panels
+    -- show, at the cost of size -- option A of the 320x240 study
+    -- (Tests/pa01-feasibility.html, built by build_pa01_page.py).
+    --
+    -- The fonts shrink 11-25% while the panel loses a third of its width, so text
+    -- claims a bigger share of this screen than of any other. Measured:
+    --   card label room 89 px   "DISTANCE TO HOME" is 96 -> lblDist (69)
+    --                           "MAX DIST TO HOME" is 94 -> "MAX DIST", as MAX ALT
+    --   card values             "123 km/h" 83, "12.34 km" 81: the widest fit
+    --   strip cell 44.6 px      "TX POWER" 49 -> "TX PWR" 36; "RX BATT" 39
+    --   "1275mAh" 46            crosses its cell's 1 px dividers by a pixel a
+    --                           side; cosmetic, nothing collides
+    --
+    -- QR: rcFrac 0.32 and qrMargin 0.02, where every other panel has 0.30/0.07.
+    -- At 0.30 the column is 93 px and a 7% margin knocks the code from 3 px a
+    -- module to 2 (0.30 mm); with 0.02 it stays at 3 px but leaves a quiet zone
+    -- of ONE module, where the MK2's code has seven. 0.32 buys a second module of
+    -- quiet zone for 3 px of card width the labels can spare.
+    --
+    -- The model name is STDSIZE, not MIDSIZE. The mode pill appears as soon as
+    -- the FC sends ANY mode string -- disarmed included: Betaflight sends WAIT*
+    -- until the first arm -- and from then on MIDSIZE left the name 3 letters
+    -- ("Swo.."). STDSIZE keeps 6-7 ("Swordf..") in every state, the size of the
+    -- timer beside it. Dropping the name would buy nothing: the header's free
+    -- space only becomes gap, the pills do not grow.
+    --
+    -- "ALT", not "ALTITUDE": the label row also carries the MSL note, and
+    -- "ALTITUDE" + "2427m MSL" is 106 px, so statCard would drop the figure on
+    -- every frame. "ALT" leaves room in every case measured, imperial
+    -- "15781ft MSL" included (81 px). Landed, "MAX ALT" + note does not fit and
+    -- the max MSL is dropped -- statCard does that by design.
+    pad = 4,
+    fLabel = SMLSIZE, fVal = MIDSIZE, fPill = SMLSIZE, fTimer = F_STD,
+    fBatt  = F_STD,   fStripL = SMLSIZE, fStripV = SMLSIZE,  fCoL  = SMLSIZE,
+    fCo    = SMLSIZE, fName = F_STD,
+    fPhBig = MIDSIZE, fPhSm = SMLSIZE,
+    hdrGap = 3, hdrMin = 22, pillH = 16, pillPad = 5,
+    battW = 18, battH = 10, battNub = 2, battGap = 4,
+    -- cardPadTop/Bot 7/8 tuck the value under its label. The value is
+    -- bottom-aligned, and at 3/4 it floated 14 px under the label, 1.08x its own
+    -- cap height -- the drift panel_test guards against (the shipped panels sit
+    -- at 0.41-0.59). 4 px each way centers the pair and closes it to 6.
+    accentW = 3, cardPadX = 8, cardPadTop = 7, cardPadRight = 5, cardPadBot = 8,
+    stripH = 34, stripPadTop = 3, stripPadBot = 4,
+    rcFrac = 0.32, qrFrac = 0.60, qrMargin = 0.02, coordPadX = 5,
+    phUp = 14, phDown = 5,
+    lblDist    = "DIST TO HOME",
+    lblAlt     = "ALT",
+    lblMaxDist = "MAX DIST",
+    lblMaxAlt  = "MAX ALT",
+    lblTxPwr   = "TX PWR",
+    lblRxBatt  = "RX BATT",
+    lblMah     = "USED",
+    mslSep     = "",
+    okSlack = 2,
+    -- A full-screen zone is the whole 320x240; anything narrower than 300 is a
+    -- multi-zone layout. Height is left to the L.ok test, which knows the fonts.
+    minZoneW = 300, minZoneH = 200,
   },
 }
 
@@ -2363,7 +2454,7 @@ local function computeLayout(z)
 
   -- L.fLabel, not a literal SMLSIZE: the header's height must be measured with
   -- the same font the labels below it are drawn in, and that is a PROFILE field.
-  -- The two agree on all three panels today, so this is insurance -- against a
+  -- They agree on all four panels today, so this is insurance -- against a
   -- new profile choosing a different label font and silently sizing the header
   -- from the old one.
   local _, lblH   = textSize("Ag", L.fLabel)
@@ -2463,6 +2554,7 @@ local function computeLayout(z)
          and (L.coord[4] >= lhCo + floor(lhCo / 3))
          and (cardsH > 0) and (leftW > 0) and (rcW > 0)
          and (L.labelRoom >= textSize(P.lblMaxDist, L.fLabel))
+         and (L.labelRoom >= textSize(P.lblDist, L.fLabel))
   return L
 end
 
@@ -2506,6 +2598,7 @@ local PANEL_HINT = {
   "800x480",
   "480x272",
   "480x320",
+  "320x240",
 }
 
 local function drawTooSmall(z, badPanel)
@@ -2827,7 +2920,7 @@ local function drawScreen(L)
   -- L.ok now checks this width itself, so a radio whose fonts are bigger than the
   -- profile assumes refuses the screen instead of clipping. The figures still
   -- matter: the check is the backstop, not the design.
-  statCard(L.cards[1], C.purple, showMax and L.P.lblMaxDist or "DISTANCE TO HOME",
+  statCard(L.cards[1], C.purple, showMax and L.P.lblMaxDist or L.P.lblDist,
            dV, dU, L, nil, live)
 
   -- TRIP is integrated from consecutive GPS fixes, so it may only show a number
@@ -2877,7 +2970,7 @@ local function drawScreen(L)
       aNote = mV .. L.P.mslSep .. mU .. " MSL"
     end
   end
-  statCard(L.cards[3], C.blue, showMax and L.P.lblMaxAlt or "ALTITUDE",
+  statCard(L.cards[3], C.blue, showMax and L.P.lblMaxAlt or L.P.lblAlt,
            aV, aU, L, aNote, live)
 
   local sV, sU = "--", ""
@@ -2958,13 +3051,13 @@ local function drawScreen(L)
   local _, clh = textSize("LAT", L.fCoL)
   local _, cvh = textSize("0", L.fCo)
   -- The two rows sit a quarter and three quarters down the card, which reads
-  -- correctly while the card is roughly two line boxes tall -- it is on every
-  -- panel that has been measured (800x480: 61 px for 2x28; 480x272: 33 for
-  -- 2x16). A profile running LETTERBOXED is handed a card it was never drawn
-  -- for: 480x320 gives this one 73 px, and proportional spacing would fling LAT
+  -- correctly while the card is roughly two line boxes tall, as it is on the two
+  -- TX16S panels (800x480: 61 px for 2x28; 480x272: 33 for 2x16). The taller
+  -- panels hand this card more than it was drawn for -- 480x320 gives it 67 px
+  -- for 2x19, 320x240 57 for 2x14 -- and proportional spacing would fling LAT
   -- and LON to opposite ends of it with a hole in between. Past 2.5 line boxes,
-  -- stop scaling and just center the pair. Below that -- i.e. on both panels
-  -- anyone has actually run -- this changes nothing.
+  -- stop scaling and just center the pair, one line box apart (panel_test pins
+  -- that on every panel). On the two TX16S panels this changes nothing.
   local span = max(clh, cvh)
   if cch > 2 * span + floor(span / 2) then
     half = span
@@ -3031,7 +3124,8 @@ local function update(wgt, options)
   wgt.options = options
 end
 
--- runs even when this screen isn't showing, so home/arm/trip tracking continues
+-- runs even when this screen isn't showing, so home/arm/trip tracking continues.
+-- ONLY then, though: a widget on screen gets refresh() instead -- see below.
 local function background(wgt)
   local now = getTime()
   readSensors()
@@ -3041,21 +3135,44 @@ end
 local function refresh(wgt, event, touchState)
   local z = wgt.zone
   if not inited then widgetInit() end
+  -- TRACK FIRST, before anything below can return. EdgeTX gives a widget
+  -- refresh() OR background() each cycle, never both: on 2.12,
+  -- WidgetsContainer::refreshWidgets() sends a widget that is on screen or full
+  -- screen to foreground() -- whose redraw is what calls this -- and every other
+  -- one to background(); on 2.8 to 2.11, LuaWidget::checkEvents() calls
+  -- background() only when no refresh() ran since its previous check. So a
+  -- VISIBLE widget is tracked here or not at all.
+  --   The two hint returns below used to come first, and while either was on
+  -- screen nothing was tracked: no arm edge, no home, no trip, no timer, and once
+  -- the link died, no last-known fix for the QR. The pilot that costs keeps GPSQR
+  -- in a dashboard cell, where it can only show its checklist, and opens it Full
+  -- screen once the model is down -- EdgeTX resizes the same zone in place, and
+  -- the instrument came up having seen none of the flight. A zone that got as
+  -- far as getLayout() did track, so the SAME checklist tracked or not depending
+  -- on which check had drawn it. `st` is shared by every instance, so an
+  -- off-screen twin's background() hid this whenever there was one
+  -- (Tests/hint_track_test.py).
+  --   Safe on any panel and any zone: neither call touches the layout --
+  -- background() has always run them unconditionally -- and a hint frame costs
+  -- that path plus a few strings, a fraction of an instrument frame.
+  local now = getTime()
+  readSensors()
+  updateLogic(now)
   -- Does any profile claim this RADIO? Ask before the zone test below: an
   -- unsupported panel is usually a small one too, and the zone checklist would
   -- send the pilot chasing Screens-setup toggles that cannot possibly help.
-  if profileFor(z.w, z.h) == nil then
+  local P = profileFor(z.w, z.h)
+  if P == nil then
     drawTooSmall(z, true)
     return
   end
   -- Cheap reject for an obviously tiny zone, before building a layout for it.
-  if z.w < 380 or z.h < 200 then
+  -- The floor is per profile (minZoneW/H): what counts as tiny depends on the
+  -- panel, and a literal 380 here once refused every 320-wide radio outright.
+  if z.w < P.minZoneW or z.h < P.minZoneH then
     drawTooSmall(z)
     return
   end
-  local now = getTime()
-  readSensors()
-  updateLogic(now)
   st.L = getLayout(z)
   -- Wide enough, but too SHORT to be legible? (top bar / sliders / trims left on)
   -- Show the setup recipe rather than a squashed, misleading instrument.
